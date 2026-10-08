@@ -1,0 +1,11 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.5
+numpy==2.2.1
+pytest==8.3.4
+httpx==0.28.1
+openai>=1.58.1,<2.0.0
+anyio==4.9.0
+SQLAlchemy==2.0.36
+alembic==1.14.1
+psycopg[binary]==3.2.3

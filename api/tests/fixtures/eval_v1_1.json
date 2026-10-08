@@ -1,0 +1,103 @@
+{
+  "version": "v1.1",
+  "cases": {
+    "no-evidence": {
+      "evidence": [],
+      "expected": {
+        "verdict": "UNPROVEN",
+        "rule": "insufficient_or_inconclusive_evidence",
+        "support_score": 50,
+        "coverage": 0,
+        "required_unknowns": ["no_evidence", "insufficient_coverage", "low_data_quality"]
+      }
+    },
+    "contradiction": {
+      "evidence": [
+        {
+          "tier": "E5",
+          "direction": "contradicting",
+          "source_quality": 0.9,
+          "source_cluster": "lost-customer-interviews",
+          "category": "problem"
+        }
+      ],
+      "expected": {
+        "verdict": "NO-GO-FOR-NOW",
+        "rule": "material_contradiction",
+        "decisive_direction": "contradicting"
+      }
+    },
+    "expensive-build-trap": {
+      "scenarios": [
+        {
+          "name": "base",
+          "price": 100.0,
+          "variable_cost": 40.0,
+          "monthly_churn": null,
+          "cac": 80.0
+        }
+      ],
+      "capital_steps": [
+        {"name": "prototype", "amount": 150000.0, "month": 0, "trigger": "validated demand"},
+        {"name": "regulated integration", "amount": 600000.0, "month": 3, "trigger": "pilot conversion"},
+        {"name": "launch", "amount": 250000.0, "month": 6, "trigger": "retention threshold"}
+      ],
+      "expected": {
+        "total_required": 1000000.0,
+        "required_unknowns": ["base.monthly_churn"],
+        "ltv_simple": null,
+        "sensitivity_status": "requires_assumption"
+      }
+    },
+    "bad-tam-unknown-churn": {
+      "scenarios": [
+        {
+          "name": "bad-tam-claim",
+          "price": 50.0,
+          "variable_cost": 15.0,
+          "monthly_churn": null,
+          "cac": null
+        }
+      ],
+      "expected": {
+        "required_unknowns": ["bad-tam-claim.monthly_churn"],
+        "ltv_simple": null,
+        "sensitivity_status": "requires_assumption"
+      }
+    },
+    "duplicate-sources": {
+      "results": [
+        {
+          "title": "Demand report",
+          "url": "https://research.example.com/report/?utm_source=search",
+          "content": "Demand signal",
+          "score": 0.9
+        },
+        {
+          "title": "Demand report mirror",
+          "url": "https://research.example.com/report",
+          "content": "Same demand signal",
+          "score": 0.8
+        },
+        {
+          "title": "Another page from same publisher",
+          "url": "https://research.example.com/interviews",
+          "content": "Additional context",
+          "score": 0.7
+        },
+        {
+          "title": "Invalid source",
+          "url": "not-a-url",
+          "content": "Ignored"
+        }
+      ],
+      "expected": {
+        "sources_created": 2,
+        "evidence_created": 1,
+        "results_skipped": 1,
+        "provenance_count": 2,
+        "source_cluster": "research.example.com"
+      }
+    }
+  }
+}

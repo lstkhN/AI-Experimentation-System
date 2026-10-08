@@ -1,0 +1,17 @@
+# Local configuration and secrets
+.env
+
+# Pi runtime state and subagent transcripts
+.pi/subagents/
+
+# Python environments and generated artifacts
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local databases and caches
+app.db
+api/app.db
+.cache/
+cache/

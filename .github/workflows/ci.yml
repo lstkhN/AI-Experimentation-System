@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: pytest
+      - run: cd .. && alembic -c alembic.ini check
+  compose-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config
+      - run: docker compose up -d --build
+      - name: Wait for API
+        run: |
+          for i in $(seq 1 60); do curl -fsS http://localhost:8000/ready && exit 0; sleep 2; done
+          docker compose logs
+          exit 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cd web && npm ci && npx playwright install --with-deps chromium
+      - run: cd web && CI_API_REQUIRED=1 API_URL=http://localhost:8000 npx playwright test
+      - if: always()
+        run: docker compose logs && docker compose down -v
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build

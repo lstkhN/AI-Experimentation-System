@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-analyst}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-analyst}
+      POSTGRES_DB: ${POSTGRES_DB:-analyst}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+  migrator:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: alembic -c alembic.ini upgrade head
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-analyst}:${POSTGRES_PASSWORD:-analyst}@postgres:5432/${POSTGRES_DB:-analyst}
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-analyst}:${POSTGRES_PASSWORD:-analyst}@postgres:5432/${POSTGRES_DB:-analyst}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      SEARCH_API_URL: ${SEARCH_API_URL:-https://api.tavily.com/search}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: python -m app.workers.main
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-analyst}:${POSTGRES_PASSWORD:-analyst}@postgres:5432/${POSTGRES_DB:-analyst}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+      SEARCH_API_URL: ${SEARCH_API_URL:-https://api.tavily.com/search}
+      WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-2}
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "const os=require('os'); const ip=os.networkInterfaces().eth0[0].address; fetch('http://' + ip + ':3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+volumes:
+  postgres_data:
