@@ -1,6 +1,47 @@
 import numpy as np
 import pytest
-from app.engines.economics import UnitEconomics, beta_update, sample_size_proportion, scenario_percentiles, simulate_economics, unit_economics
+from pydantic import ValidationError
+
+from app.engines.economics import UnitEconomics, beta_update, calculate_economics, sample_size_proportion, scenario_percentiles, simulate_economics, unit_economics
+from app.schemas.economics import ParameterProvenance
+
+def test_parameter_provenance_requires_consistent_flags_and_trusted_references():
+    assert ParameterProvenance(source_type="verified_evidence", source_id="evidence-1", observed=True).observed
+    assert ParameterProvenance(source_type="benchmark", source_id="benchmark-1", benchmark=True).benchmark
+    assert ParameterProvenance(source_type="inference", source_id="model-1", inferred=True).inferred
+    with pytest.raises(ValidationError):
+        ParameterProvenance(source_type="verified_evidence", source_id="evidence-1", benchmark=True)
+    with pytest.raises(ValidationError):
+        ParameterProvenance(source_type="benchmark", benchmark=True)
+    with pytest.raises(ValidationError):
+        ParameterProvenance(source_type="user_input", observed=True)
+
+
+def test_unresolved_caller_source_ids_cannot_make_simulation_reliable():
+    scenario = {
+        "price": {"kind": "fixed", "value": 100}, "variable_cost": {"kind": "fixed", "value": 20},
+        "monthly_churn": {"kind": "fixed", "value": .1}, "cac": {"kind": "fixed", "value": 120},
+        "fixed_monthly_cost": {"kind": "fixed", "value": 0},
+        "parameter_provenance": {
+            field: {"source_type": "verified_evidence", "source_id": "999", "confidence": "HIGH", "observed": True}
+            for field in ("price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost")
+        },
+    }
+    assert simulate_economics([scenario], iterations=1)["reliability"] == "HEURISTIC"
+    assert simulate_economics([scenario], iterations=1, trusted_source_ids={"verified_evidence": {"999"}})["reliability"] == "RELIABLE"
+
+
+def test_calculated_economics_gates_target_ratio_provenance():
+    scenario = {"price": 100, "variable_cost": 20, "monthly_churn": .1, "cac": 120, "fixed_monthly_cost": 0, "target_ltv_cac_ratio": 3}
+    fields = ("price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost", "target_ltv_cac_ratio")
+    scenario["parameter_provenance"] = {
+        field: {"source_type": "verified_evidence", "source_id": "1", "confidence": "HIGH", "observed": True}
+        for field in fields
+    }
+    assert calculate_economics([scenario], trusted_source_ids={"verified_evidence": {"1"}})["reliability"] == "RELIABLE"
+    del scenario["parameter_provenance"]["target_ltv_cac_ratio"]
+    assert calculate_economics([scenario], trusted_source_ids={"verified_evidence": {"1"}})["reliability"] == "HEURISTIC"
+
 
 def test_unit_economics_with_known_churn():
     result = unit_economics(UnitEconomics(price=100, variable_cost=20, monthly_churn=.1, cac=120, fixed_monthly_cost=800))

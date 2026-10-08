@@ -24,6 +24,7 @@ class HypothesisCriticality(str, Enum):
 
 class EconomicsReliability(str, Enum):
     RELIABLE = "RELIABLE"
+    HEURISTIC = "HEURISTIC"
     INSUFFICIENT_CRITICAL_INPUTS = "INSUFFICIENT_CRITICAL_INPUTS"
 
 
@@ -252,7 +253,7 @@ class EconomicsModel(Base):
     """Immutable snapshot of assumptions and deterministic economics output."""
 
     __tablename__ = "economics_models"
-    __table_args__ = (CheckConstraint("reliability IN ('RELIABLE', 'INSUFFICIENT_CRITICAL_INPUTS')", name="ck_economics_models_reliability"),)
+    __table_args__ = (CheckConstraint("reliability IN ('RELIABLE', 'HEURISTIC', 'INSUFFICIENT_CRITICAL_INPUTS')", name="ck_economics_models_reliability"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -272,6 +273,8 @@ class EconomicParameter(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     economics_model_id: Mapped[int] = mapped_column(ForeignKey("economics_models.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    scenario_name: Mapped[str] = mapped_column(String(100), nullable=False, default="base", server_default="base")
+    distribution: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     low: Mapped[float | None] = mapped_column(nullable=True)
     base: Mapped[float | None] = mapped_column(nullable=True)
     high: Mapped[float | None] = mapped_column(nullable=True)
@@ -293,6 +296,7 @@ class CapitalPlan(Base):
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     available_budget: Mapped[float] = mapped_column(nullable=False)
+    reserved_budget: Mapped[float] = mapped_column(nullable=False, default=0, server_default="0")
     recommended_spend: Mapped[float] = mapped_column(nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     project: Mapped[Project] = relationship(back_populates="capital_plans")

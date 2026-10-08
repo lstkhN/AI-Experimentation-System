@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import EconomicParameter, EconomicsModel, Project
+from app.db.models import EconomicParameter, EconomicsModel, Evidence, EvidenceSource, Project
 from app.db.session import get_db
 from app.engines.economics import FORMULA_VERSION, calculate_economics, simulate_economics
 from app.schemas.economics import CapitalPlanRequest, EconomicsCalculateRequest, EconomicsSimulationRequest
@@ -15,7 +15,33 @@ from app.services.audit import record_audit_event
 router = APIRouter(prefix="/api/v1/projects/{project_id}/economics", tags=["economics"])
 
 
-def _calculate(request: EconomicsCalculateRequest | CapitalPlanRequest) -> dict:
+def _trusted_source_ids(project_id: int, scenarios: list[dict], db: Session) -> dict[str, set[str]]:
+    """Resolve submitted numeric evidence IDs within this project before reliability use."""
+    requested: dict[str, set[str]] = {"verified_evidence": set(), "benchmark": set()}
+    for scenario in scenarios:
+        for source in (scenario.get("parameter_provenance") or {}).values():
+            if not isinstance(source, dict) or source.get("source_type") not in requested:
+                continue
+            source_id = source.get("source_id")
+            if isinstance(source_id, str) and source_id.strip().isdigit():
+                requested[source["source_type"]].add(source_id.strip())
+    numeric_ids = {int(value) for ids in requested.values() for value in ids}
+    if not numeric_ids:
+        return {kind: set() for kind in requested}
+    rows = db.execute(
+        select(Evidence, EvidenceSource)
+        .join(EvidenceSource, Evidence.source_id == EvidenceSource.id)
+        .where(Evidence.id.in_(numeric_ids), EvidenceSource.project_id == project_id, Evidence.evidence_status == "verified")
+    ).all()
+    verified_ids = {str(evidence.id) for evidence, _source in rows}
+    benchmark_ids = {str(evidence.id) for evidence, source in rows if source.source_type == "benchmark"}
+    return {
+        "verified_evidence": requested["verified_evidence"] & verified_ids,
+        "benchmark": requested["benchmark"] & benchmark_ids,
+    }
+
+
+def _calculate(request: EconomicsCalculateRequest | CapitalPlanRequest, project_id: int, db: Session) -> dict:
     payload = request.model_dump()
     sensitivity = payload.pop("sensitivity", None)
     return calculate_economics(
@@ -23,6 +49,7 @@ def _calculate(request: EconomicsCalculateRequest | CapitalPlanRequest) -> dict:
         sensitivity_rates=sensitivity["monthly_churn_rates"] if sensitivity else None,
         capital_steps=payload["capital_steps"],
         currency=payload["currency"],
+        trusted_source_ids=_trusted_source_ids(project_id, payload["scenarios"], db),
     )
 
 
@@ -48,16 +75,24 @@ def _save(project_id: int, request: EconomicsCalculateRequest | CapitalPlanReque
     )
     db.add(snapshot)
     db.flush()
-    # Persist one auditable record per submitted economic parameter.
+    # Persist one typed, auditable record per submitted economic parameter.
+    # Distribution JSON is retained verbatim so a simulation can be reproduced
+    # independently of its aggregate snapshot.
     for scenario in inputs.get("scenarios", []):
         provenance = scenario.get("parameter_provenance", {}) or {}
         for name, raw in scenario.items():
-            if name in {"name", "parameter_provenance"} or isinstance(raw, (dict, list)):
+            if name in {"name", "parameter_provenance"}:
                 continue
-            value = raw if isinstance(raw, (int, float)) else None
+            distribution = raw if isinstance(raw, dict) and "kind" in raw else None
+            if isinstance(raw, (dict, list)) and distribution is None:
+                continue
+            value = raw if isinstance(raw, (int, float)) else (raw.get("value") if distribution and raw.get("kind") == "fixed" else None)
+            low = raw.get("low") if distribution else None
+            high = raw.get("high") if distribution else None
             source = provenance.get(name, {}) if isinstance(provenance.get(name, {}), dict) else {}
             db.add(EconomicParameter(
-                economics_model_id=snapshot.id, name=name, base=value,
+                economics_model_id=snapshot.id, scenario_name=scenario.get("name", "base"), name=name,
+                distribution=distribution, low=low, base=value, high=high,
                 source_type=source.get("source_type", "user_input"), source_id=source.get("source_id"),
                 confidence=source.get("confidence", "LOW" if not source else "MEDIUM"),
                 user_supplied=not bool(source.get("source_type") not in (None, "user_input")),
@@ -82,7 +117,7 @@ def calculate(project_id: int, request: EconomicsCalculateRequest, db: Annotated
     """Calculate scenarios and save the exact assumptions/result as a snapshot."""
     if db.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    result = _calculate(request)
+    result = _calculate(request, project_id, db)
     snapshot = _save(project_id, request, result, db)
     return {"snapshot_id": snapshot.id, **result}
 
@@ -93,7 +128,7 @@ def simulate(project_id: int, request: EconomicsSimulationRequest, db: Annotated
     if db.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
     payload = request.model_dump()
-    result = simulate_economics(**payload)
+    result = simulate_economics(**payload, trusted_source_ids=_trusted_source_ids(project_id, payload["scenarios"], db))
     snapshot = _save(project_id, request, result, db)
     record_audit_event(
         db, project_id=project_id, event_type="economics.simulation.created",
@@ -109,7 +144,7 @@ def create_capital_plan(project_id: int, request: CapitalPlanRequest, db: Annota
     """Save a capital plan; economics scenarios are optional for a funding-only plan."""
     if db.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    result = _calculate(request)
+    result = _calculate(request, project_id, db)
     snapshot = _save(project_id, request, result, db)
     return {"snapshot_id": snapshot.id, **result["capital_plan"], "scenarios": result["scenarios"], "unknowns": result["unknowns"], "reliability": result["reliability"]}
 

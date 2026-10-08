@@ -6,12 +6,38 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class ParameterProvenance(BaseModel):
+    """Source classification for one submitted economics assumption.
+
+    Classification flags deliberately mirror ``source_type`` so persisted
+    snapshots cannot claim an observed, benchmark, or inferred value under a
+    contradictory source type.
+    """
+
     source_type: Literal["user_input", "verified_evidence", "benchmark", "inference"] = "user_input"
-    source_id: str | None = None
+    source_id: str | None = Field(default=None, min_length=1, max_length=255)
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
     observed: bool = False
     benchmark: bool = False
     inferred: bool = False
+
+    @model_validator(mode="after")
+    def validate_classification(self) -> "ParameterProvenance":
+        expected_flag = {
+            "user_input": None,
+            "verified_evidence": "observed",
+            "benchmark": "benchmark",
+            "inference": "inferred",
+        }[self.source_type]
+        enabled_flags = {name for name in ("observed", "benchmark", "inferred") if getattr(self, name)}
+        if expected_flag is None:
+            if enabled_flags:
+                raise ValueError("user_input provenance cannot be observed, benchmark, or inferred")
+            return self
+        if enabled_flags != {expected_flag}:
+            raise ValueError(f"{self.source_type} provenance requires only {expected_flag}=true")
+        if not self.source_id or not self.source_id.strip():
+            raise ValueError(f"{self.source_type} provenance requires a trusted source_id")
+        return self
 
 
 class UnitEconomicsScenario(BaseModel):

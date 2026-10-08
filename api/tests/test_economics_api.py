@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.db.models import EconomicParameter, Evidence, EvidenceSource
 from sqlalchemy.pool import StaticPool
 
 from app.db.models import Base
@@ -49,6 +51,40 @@ def test_calculate_economics_persists_snapshot_and_churn_sensitivity():
         engine.dispose()
 
 
+def test_calculation_reliability_requires_project_verified_evidence_ids():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "Provenance"}).json()
+        fields = ("price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost", "target_ltv_cac_ratio")
+        scenario = {
+            "price": 100, "variable_cost": 20, "monthly_churn": 0.1, "cac": 120,
+            "fixed_monthly_cost": 0, "target_ltv_cac_ratio": 3,
+            "parameter_provenance": {
+                field: {"source_type": "verified_evidence", "source_id": "999", "confidence": "HIGH", "observed": True}
+                for field in fields
+            },
+        }
+        assert client.post(f"/api/v1/projects/{project['id']}/economics/calculate", json={"scenarios": [scenario]}).json()["reliability"] == "HEURISTIC"
+        with Session(engine) as db:
+            source = EvidenceSource(project_id=project["id"], identity_key="economics-source", name="Verified")
+            db.add(source)
+            db.flush()
+            evidence = Evidence(source_id=source.id, content="verified economics input", evidence_status="verified")
+            db.add(evidence)
+            db.commit()
+            evidence_id = str(evidence.id)
+        for provenance in scenario["parameter_provenance"].values():
+            provenance["source_id"] = evidence_id
+        response = client.post(f"/api/v1/projects/{project['id']}/economics/calculate", json={"scenarios": [scenario]})
+        assert response.status_code == 200
+        assert response.json()["reliability"] == "RELIABLE"
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_unknown_churn_is_explicit_and_capital_plan_can_be_saved_without_scenarios():
     client, engine = _client()
     try:
@@ -90,10 +126,16 @@ def test_simulation_api_is_seeded_and_persists_provenance():
         response = client.post(f"/api/v1/projects/{project['id']}/economics/simulate", json=payload)
         assert response.status_code == 200
         body = response.json()
-        assert body["formula_version"] == "economics-mvp-v1"
+        assert body["formula_version"] == "economics-decision-v2"
         assert body["provenance"]["llm_used"] is False
         assert body["provenance"]["seed"] == 9
         assert set(body["scenarios"][0]["payback_months"]) == {"p10", "p50", "p90"}
+        assert body["reliability"] == "HEURISTIC"
+        assert body["decision_contract"]["threshold"]["critical_parameters"] == ["price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost"]
+        with Session(engine) as db:
+            price = db.query(EconomicParameter).filter_by(name="price").one()
+            assert price.scenario_name == "base"
+            assert price.distribution == {"kind": "uniform", "value": None, "low": 90.0, "high": 110.0, "mode": None, "mean": None, "stddev": None}
     finally:
         client.close()
         app.dependency_overrides.clear()

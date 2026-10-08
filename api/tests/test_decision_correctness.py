@@ -56,6 +56,20 @@ def test_decision_report_separates_market_viability_experiments_and_capital():
     assert result["capital_recommendation"]["status"] == "gated"
 
 
-def test_economics_reliability_requires_churn_and_cac():
+def test_economics_reliability_requires_qualified_provenance_for_every_critical_parameter():
     assert calculate_economics([{"name": "base", "price": 100, "variable_cost": 20, "monthly_churn": None, "cac": None}])["reliability"] == "INSUFFICIENT_CRITICAL_INPUTS"
-    assert calculate_economics([{"name": "base", "price": 100, "variable_cost": 20, "monthly_churn": .1, "cac": 50}])["reliability"] == "RELIABLE"
+    fields = ("price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost", "target_ltv_cac_ratio")
+    scenario = {"name": "base", "price": 100, "variable_cost": 20, "monthly_churn": .1, "cac": 50,
+                "fixed_monthly_cost": 0, "target_ltv_cac_ratio": 3}
+    assert calculate_economics([scenario])["reliability"] == "HEURISTIC"
+    scenario["parameter_provenance"] = {
+        name: {"source_type": "verified_evidence", "confidence": "MEDIUM", "source_id": f"source-{name}", "observed": True}
+        for name in fields
+    }
+    # Caller-supplied identifiers are not trusted by the pure calculation.
+    assert calculate_economics([scenario])["reliability"] == "HEURISTIC"
+    result = calculate_economics(
+        [scenario], trusted_source_ids={"verified_evidence": {f"source-{name}" for name in fields}}
+    )
+    assert result["reliability"] == "RELIABLE"
+    assert result["decision_contract"]["classification"] == "HEURISTIC"

@@ -1,6 +1,6 @@
 """Decision-oriented aliases for capital intelligence."""
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.db.models import CapitalGate, CapitalPlan, Project
@@ -20,8 +20,8 @@ def get_plan_alias(project_id: int, plan_id: int, db: Annotated[Session, Depends
     return _serialize(_plan(project_id, plan_id, db))
 
 @router.post("/plan/{plan_id}/allocate")
-def allocate_alias(project_id: int, plan_id: int, data: AllocationRequest, db: Annotated[Session, Depends(get_db)]):
-    return allocate(project_id, plan_id, data, db)
+def allocate_alias(project_id: int, plan_id: int, data: AllocationRequest, db: Annotated[Session, Depends(get_db)], idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=120)] = None):
+    return allocate(project_id, plan_id, data, db, idempotency_key)
 
 @router.post("/plan/{plan_id}/gates/evaluate")
 def evaluate_alias(project_id: int, plan_id: int, data: GateEvaluationRequest, db: Annotated[Session, Depends(get_db)]):

@@ -31,5 +31,17 @@ class GateEvaluationRequest(BaseModel):
     metrics: dict[str, float] = Field(default_factory=dict)
 
 
+class CandidateExperiment(BaseModel):
+    """A candidate test ranked against the currently allocable capital budget."""
+    name: str = Field(min_length=1, max_length=255)
+    cost: float = Field(ge=0)
+    criticality: float = Field(default=1, ge=0)
+    evidence_gap: float = Field(default=1, ge=0)
+    probability_of_decisive_result: float = Field(default=0, ge=0, le=1)
+    expected_information_gain: float = Field(default=0, ge=0)
+    time_to_result_days: float = Field(default=0, ge=0)
+
+
 class AllocationRequest(BaseModel):
     available_budget: float | None = Field(default=None, ge=0)
+    candidate_experiments: list[CandidateExperiment] = Field(default_factory=list, max_length=100)

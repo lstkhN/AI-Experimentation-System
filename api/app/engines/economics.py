@@ -3,7 +3,31 @@ from dataclasses import dataclass
 import math
 import numpy as np
 
-FORMULA_VERSION = "economics-mvp-v1"
+FORMULA_VERSION = "economics-decision-v2"
+CRITICAL_PARAMETERS = ("price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost")
+# The target ratio is a decision policy used to calculate CAC targets, so it
+# must have the same provenance standard for calculated economics results.
+CALCULATION_CRITICAL_PARAMETERS = CRITICAL_PARAMETERS + ("target_ltv_cac_ratio",)
+
+# A model with complete numbers remains a heuristic until each decision-critical
+# assumption is attributable to evidence or a benchmark at the stated threshold.
+HEURISTIC_CONTRACT = {
+    "classification": "HEURISTIC",
+    "method": "unit_economics_with_optional_seeded_monte_carlo",
+    "version": FORMULA_VERSION,
+    "assumptions": [
+        "LTV is gross profit per customer divided by monthly churn.",
+        "CAC, churn, price, variable cost, and fixed monthly cost are independent draws.",
+        "Budget bands are planning estimates, not a funding authorization.",
+    ],
+    "threshold": {
+        "reliable_source_types": ["verified_evidence", "benchmark"],
+        "minimum_confidence": "MEDIUM",
+        "source_id_required": True,
+        "critical_parameters": list(CRITICAL_PARAMETERS),
+        "calculation_critical_parameters": list(CALCULATION_CRITICAL_PARAMETERS),
+    },
+}
 
 
 def _p10_p50_p90(samples: np.ndarray) -> dict:
@@ -25,8 +49,51 @@ def _draw_distribution(spec: dict, rng: np.random.Generator, iterations: int) ->
     raise ValueError(f"unsupported distribution: {kind}")
 
 
+def _reliability(
+    scenarios: list[dict], *, required_parameters: tuple[str, ...] = CRITICAL_PARAMETERS,
+    trusted_source_ids: dict[str, set[str]] | None = None,
+) -> tuple[str, list[str]]:
+    """Gate decision-grade reliability on provenance resolved by the project boundary.
+
+    Caller-supplied source IDs are labels, not proof.  Only IDs resolved by the
+    API against verified project evidence/benchmarks can qualify a result.
+    """
+    failures: list[str] = []
+    qualifying_sources = set(HEURISTIC_CONTRACT["threshold"]["reliable_source_types"])
+    qualifying_confidence = {"MEDIUM", "HIGH"}
+    trusted_source_ids = trusted_source_ids or {}
+    for scenario in scenarios:
+        name = scenario.get("name", "base")
+        provenance = scenario.get("parameter_provenance") or {}
+        for parameter in required_parameters:
+            value = scenario.get(parameter)
+            if value is None:
+                failures.append(f"{name}.{parameter}:missing")
+                continue
+            source = provenance.get(parameter) or {}
+            source_type = source.get("source_type")
+            expected_flag = {
+                "verified_evidence": "observed",
+                "benchmark": "benchmark",
+                "inference": "inferred",
+                "user_input": None,
+            }.get(source_type)
+            enabled_flags = {flag for flag in ("observed", "benchmark", "inferred") if source.get(flag)}
+            if (source_type not in qualifying_sources
+                    or source.get("confidence") not in qualifying_confidence
+                    or not isinstance(source.get("source_id"), str)
+                    or not source["source_id"].strip()
+                    or source["source_id"].strip() not in trusted_source_ids.get(source_type, set())
+                    or enabled_flags != {expected_flag}):
+                failures.append(f"{name}.{parameter}:unqualified_provenance")
+    if failures:
+        return ("INSUFFICIENT_CRITICAL_INPUTS" if any(item.endswith(":missing") for item in failures) else "HEURISTIC", failures)
+    return "RELIABLE", []
+
+
 def simulate_economics(
     scenarios: list[dict], *, iterations: int = 5000, seed: int = 0, currency: str = "USD", capital_steps: list[dict] | None = None,
+    trusted_source_ids: dict[str, set[str]] | None = None,
 ) -> dict:
     """Seeded Monte Carlo unit-economics simulation using only request distributions.
 
@@ -76,9 +143,12 @@ def simulate_economics(
                 "uncertainty_width_p90_minus_p10": float(np.percentile(contribution, 90) - np.percentile(contribution, 10)),
             },
         })
+    reliability, reliability_failures = _reliability(scenarios, trusted_source_ids=trusted_source_ids)
     return {
         "formula_version": FORMULA_VERSION,
-        "reliability": "RELIABLE" if output else "INSUFFICIENT_CRITICAL_INPUTS",
+        "decision_contract": HEURISTIC_CONTRACT,
+        "reliability": reliability if output else "INSUFFICIENT_CRITICAL_INPUTS",
+        "reliability_failures": reliability_failures,
         "provenance": {"calculation": "seeded_monte_carlo", "llm_used": False, "rng": "numpy.PCG64", "seed": seed, "iterations": iterations},
         "scenarios": output,
         "capital_steps": capital_steps or [],
@@ -155,6 +225,7 @@ def calculate_economics(
     sensitivity_rates: list[float] | None = None,
     capital_steps: list[dict] | None = None,
     currency: str = "USD",
+    trusted_source_ids: dict[str, set[str]] | None = None,
 ) -> dict:
     """Calculate project economics deterministically from JSON-safe assumptions."""
     calculated = []
@@ -181,15 +252,24 @@ def calculate_economics(
     # Price, variable cost, churn, and CAC are required to make a project-level
     # investment decision.  A capital plan can still be saved without them,
     # but must not be treated as decision-grade economics.
-    reliability = "RELIABLE" if calculated and not unknowns and all(
+    provenance_reliability, reliability_failures = _reliability(
+        scenarios,
+        required_parameters=CALCULATION_CRITICAL_PARAMETERS,
+        trusted_source_ids=trusted_source_ids,
+    )
+    has_metrics = calculated and not unknowns and all(
         scenario["metrics"].get("ltv_simple") is not None
         and "months_to_payback" in scenario["metrics"]
         for scenario in calculated
-    ) else "INSUFFICIENT_CRITICAL_INPUTS"
+    )
+    reliability = provenance_reliability if has_metrics else "INSUFFICIENT_CRITICAL_INPUTS"
     return {
+        "formula_version": FORMULA_VERSION,
+        "decision_contract": HEURISTIC_CONTRACT,
         "scenarios": calculated,
         "unknowns": unknowns,
         "reliability": reliability,
+        "reliability_failures": reliability_failures,
         "capital_plan": {
             "currency": currency.upper(),
             "total_required": sum(step["amount"] for step in normalized_steps),
