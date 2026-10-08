@@ -348,7 +348,14 @@ def test_evidence_candidate_schema_has_no_fk_sort_cycle():
     assert not any("unresolvable cycles" in str(warning.message) for warning in captured)
 
 
-def test_migration_roundtrips_populated_reverse_only_promotion_with_sqlite_foreign_keys(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("matching_link", "initial_candidate_id"),
+    [(False, None), (True, "candidate")],
+    ids=["reverse-only-link", "matching-link"],
+)
+def test_migration_roundtrips_populated_promotion_with_sqlite_foreign_keys(
+    tmp_path, monkeypatch, matching_link, initial_candidate_id,
+):
     # env.py prioritizes DATABASE_URL over Config, so explicitly remove it.
     monkeypatch.delenv("DATABASE_URL", raising=False)
     root = Path(__file__).resolve().parents[2]
@@ -367,9 +374,13 @@ def test_migration_roundtrips_populated_reverse_only_promotion_with_sqlite_forei
             source_metadata={"provider": "legacy-import", "confidence": 0.8},
         )
         db.add_all((candidate, source)); db.flush()
-        # A populated reverse-only legacy link must become canonical on upgrade
-        # and be restored on downgrade without losing its evidence provenance.
-        evidence = Evidence(source_id=source.id, content="promoted claim")
+        # A populated legacy link, including a matching link on both sides, must
+        # round-trip without losing its evidence provenance.
+        evidence = Evidence(
+            source_id=source.id,
+            candidate_id=candidate.id if initial_candidate_id == "candidate" else None,
+            content="promoted claim",
+        )
         db.add(evidence); db.flush()
         db.execute(
             text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
@@ -388,14 +399,19 @@ def test_migration_roundtrips_populated_reverse_only_promotion_with_sqlite_forei
     with engine.connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
-        assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() is None
+        assert connection.exec_driver_sql(
+            "SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)
+        ).scalar() == (candidate_id if matching_link else None)
         assert connection.exec_driver_sql(
             "SELECT promoted_evidence_id FROM evidence_candidates WHERE id = ?", (candidate_id,)
         ).scalar() == evidence_id
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar() == "20250325_0020"
         with Operations.context(MigrationContext.configure(connection)):
             migration.upgrade()
         connection.commit()
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        assert migration.revision == "20250326_0021"
+        assert migration.down_revision == "20250325_0020"
         assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() == candidate_id
         assert connection.exec_driver_sql("SELECT id FROM evidence_candidates WHERE id = ?", (candidate_id,)).scalar() == candidate_id
         with pytest.raises(IntegrityError):
