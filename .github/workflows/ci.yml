@@ -50,16 +50,26 @@ jobs:
               """), {"project_id": project_id}).scalar_one()
               evidence_id = connection.execute(text("""
                   INSERT INTO evidence (
-                      source_id, candidate_id, content, direction, tier, category, relevance, source_quality, source_cluster, independent
+                      source_id, content, direction, tier, category, relevance, source_quality, source_cluster, independent
                   ) VALUES (
-                      :source_id, :candidate_id, 'promoted claim', 'supporting', 'E1', 'problem', 1.0, 0.75, 'fixture', true
+                      :source_id, 'promoted claim', 'supporting', 'E1', 'problem', 1.0, 0.75, 'fixture', true
                   ) RETURNING id
-              """), {"source_id": source_id, "candidate_id": candidate_id}).scalar_one()
+              """), {"source_id": source_id}).scalar_one()
               connection.execute(text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
                                  {"evidence_id": evidence_id, "candidate_id": candidate_id})
               connection.execute(text("CREATE TABLE migration_0021_fixture (project_id integer, source_id integer, candidate_id integer, evidence_id integer)"))
               connection.execute(text("INSERT INTO migration_0021_fixture VALUES (:project_id, :source_id, :candidate_id, :evidence_id)"),
                                  {"project_id": project_id, "source_id": source_id, "candidate_id": candidate_id, "evidence_id": evidence_id})
+          PY
+          docker compose exec -T api python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.connect() as connection:
+              fixture = connection.execute(text("SELECT candidate_id, evidence_id FROM migration_0021_fixture")).mappings().one()
+              assert connection.execute(text("SELECT candidate_id FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() is None
+              assert connection.execute(text("SELECT promoted_evidence_id FROM evidence_candidates WHERE id = :id"), {"id": fixture["candidate_id"]}).scalar_one() == fixture["evidence_id"]
           PY
           docker compose exec -T api alembic upgrade 20250326_0021
           docker compose exec -T api python - <<'PY'

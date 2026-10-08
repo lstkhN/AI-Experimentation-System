@@ -348,7 +348,7 @@ def test_evidence_candidate_schema_has_no_fk_sort_cycle():
     assert not any("unresolvable cycles" in str(warning.message) for warning in captured)
 
 
-def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_foreign_keys(tmp_path, monkeypatch):
+def test_migration_roundtrips_populated_reverse_only_promotion_with_sqlite_foreign_keys(tmp_path, monkeypatch):
     # env.py prioritizes DATABASE_URL over Config, so explicitly remove it.
     monkeypatch.delenv("DATABASE_URL", raising=False)
     root = Path(__file__).resolve().parents[2]
@@ -367,8 +367,9 @@ def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_forei
             source_metadata={"provider": "legacy-import", "confidence": 0.8},
         )
         db.add_all((candidate, source)); db.flush()
-        # This matching legacy pair must survive the 0021 roundtrip intact.
-        evidence = Evidence(source_id=source.id, candidate_id=candidate.id, content="promoted claim")
+        # A populated reverse-only legacy link must become canonical on upgrade
+        # and be restored on downgrade without losing its evidence provenance.
+        evidence = Evidence(source_id=source.id, content="promoted claim")
         db.add(evidence); db.flush()
         db.execute(
             text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
@@ -387,6 +388,10 @@ def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_forei
     with engine.connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() is None
+        assert connection.exec_driver_sql(
+            "SELECT promoted_evidence_id FROM evidence_candidates WHERE id = ?", (candidate_id,)
+        ).scalar() == evidence_id
         with Operations.context(MigrationContext.configure(connection)):
             migration.upgrade()
         connection.commit()
@@ -445,7 +450,12 @@ def test_migration_rejects_contradictory_candidate_promotion_mappings_with_sqlit
     with Session(engine) as db:
         project = Project(name="migration project")
         db.add(project); db.flush()
-        source = EvidenceSource(project=project, identity_key="migration-source", name="source")
+        source = EvidenceSource(
+            project=project,
+            identity_key="migration-source",
+            name="source",
+            source_metadata={"provider": "legacy-import", "confidence": 0.8},
+        )
         legacy_candidate = EvidenceCandidate(project_id=project.id, claim="legacy", source_name="source")
         canonical_candidate = EvidenceCandidate(project_id=project.id, claim="canonical", source_name="source")
         db.add_all((source, legacy_candidate, canonical_candidate)); db.flush()
@@ -455,6 +465,8 @@ def test_migration_rejects_contradictory_candidate_promotion_mappings_with_sqlit
             text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
             {"evidence_id": evidence.id, "candidate_id": legacy_candidate.id},
         )
+        source_id = source.id
+        legacy_candidate_id = legacy_candidate.id
         evidence_id = evidence.id
         canonical_candidate_id = canonical_candidate.id
         db.commit()
@@ -470,7 +482,25 @@ def test_migration_rejects_contradictory_candidate_promotion_mappings_with_sqlit
         with Operations.context(MigrationContext.configure(connection)):
             with pytest.raises(RuntimeError, match="contradictory promotion mapping.*legacy candidate"):
                 migration.upgrade()
+        # Reconciliation fails before any DDL, preserving the complete legacy
+        # mapping and all dependent data atomically.
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
         assert connection.exec_driver_sql(
             "SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)
         ).scalar() == canonical_candidate_id
+        assert connection.exec_driver_sql(
+            "SELECT promoted_evidence_id FROM evidence_candidates WHERE id = ?", (legacy_candidate_id,)
+        ).scalar() == evidence_id
+        assert connection.exec_driver_sql(
+            "SELECT content FROM evidence WHERE id = ?", (evidence_id,)
+        ).scalar() == "promoted claim"
+        assert connection.exec_driver_sql(
+            "SELECT source_id FROM evidence WHERE id = ?", (evidence_id,)
+        ).scalar() == source_id
+        assert connection.exec_driver_sql(
+            "SELECT source_metadata FROM evidence_sources WHERE id = ?", (source_id,)
+        ).scalar() == '{"provider": "legacy-import", "confidence": 0.8}'
+        assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar() == "20250325_0020"
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
+        assert any(row[2] == "evidence_candidates" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence)"))
+        assert any(row[2] == "evidence" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence_candidates)"))
