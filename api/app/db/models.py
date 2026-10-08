@@ -549,7 +549,6 @@ class Evidence(Base):
 
 class EvidenceCandidate(Base):
     __tablename__ = "evidence_candidates"
-    __table_args__ = (Index("uq_evidence_candidates_promoted_evidence", "promoted_evidence_id", unique=True),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     hypothesis_id: Mapped[int | None] = mapped_column(ForeignKey("hypotheses.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -561,7 +560,6 @@ class EvidenceCandidate(Base):
     source_quality: Mapped[float] = mapped_column(default=0.0, nullable=False)
     source_cluster: Mapped[str] = mapped_column(String(255), default="unknown", nullable=False)
     observed_on: Mapped[date | None] = mapped_column(nullable=True)
-    promoted_evidence_id: Mapped[int | None] = mapped_column(ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 

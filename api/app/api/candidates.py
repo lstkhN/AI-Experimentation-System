@@ -100,17 +100,10 @@ def promote(project_id: int, candidate_id: int, data: CandidatePromotion, db: An
     item=db.scalar(select(EvidenceCandidate).where(EvidenceCandidate.id==candidate_id, EvidenceCandidate.project_id==project_id).with_for_update())
     if item is None: raise HTTPException(404,"Evidence candidate not found")
     if item.status != "verified": raise HTTPException(409,"Candidate must be verified before promotion")
-    # Promotion is retry-safe: the candidate records the one durable evidence row it created.
-    if item.promoted_evidence_id is not None:
-        evidence = db.get(Evidence, item.promoted_evidence_id)
-        if evidence is not None:
-            return evidence
-    # The unique evidence.candidate_id index is a second, database-level
-    # idempotency guard if an earlier request committed before updating candidate.
+    # The unique evidence.candidate_id link is both the canonical promotion
+    # record and the database-level idempotency guard.
     evidence = db.scalar(select(Evidence).where(Evidence.candidate_id == item.id))
     if evidence is not None:
-        item.promoted_evidence_id = evidence.id
-        db.commit()
         return evidence
     # The unique project/identity key and savepoint retry make source creation
     # safe when independent promotion requests arrive concurrently.
@@ -130,7 +123,7 @@ def promote(project_id: int, candidate_id: int, data: CandidatePromotion, db: An
         evidence = db.scalar(select(Evidence).where(Evidence.candidate_id == item.id))
         if evidence is None:
             raise
-    item.verification_reason=data.verification_reason; item.promoted_evidence_id=evidence.id; db.commit(); db.refresh(evidence); return evidence
+    item.verification_reason=data.verification_reason; db.commit(); db.refresh(evidence); return evidence
 
 @router.post("/{candidate_id}/reject")
 def reject(project_id: int, candidate_id: int, data: CandidateDecision, db: Annotated[Session, Depends(get_db)]):

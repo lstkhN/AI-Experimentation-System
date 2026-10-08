@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import warnings
 
 import pytest
 
@@ -336,13 +337,31 @@ def test_pipeline_refuses_stale_lease_before_creating_artifacts():
         assert db.scalars(select(ResearchStageRun).where(ResearchStageRun.analysis_run_id == run_id)).all() == []
 
 
-def test_migration_upgrades_sqlite_with_promotion_unique_index(tmp_path, monkeypatch):
+def test_evidence_candidate_schema_has_no_fk_sort_cycle():
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        Base.metadata.sorted_tables
+    assert not any("unresolvable cycles" in str(warning.message) for warning in captured)
+
+
+def test_migration_removes_candidate_promotion_fk_cycle_on_sqlite(tmp_path, monkeypatch):
     # env.py prioritizes DATABASE_URL over Config, so explicitly remove it.
     monkeypatch.delenv("DATABASE_URL", raising=False)
     root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{tmp_path / 'migration.db'}"
     config = Config(str(root / "alembic.ini"))
-    config.set_main_option("sqlalchemy.url", f"sqlite:///{tmp_path / 'migration.db'}")
+    config.set_main_option("sqlalchemy.url", database_url)
     command.upgrade(config, "head")
+
     from sqlalchemy import inspect
-    indexes = inspect(create_engine(f"sqlite:///{tmp_path / 'migration.db'}")).get_indexes("evidence_candidates")
-    assert any(index["name"] == "uq_evidence_candidates_promoted_evidence" and index["unique"] for index in indexes)
+    inspector = inspect(create_engine(database_url))
+    assert "promoted_evidence_id" not in {column["name"] for column in inspector.get_columns("evidence_candidates")}
+    assert not any(fk["referred_table"] == "evidence" for fk in inspector.get_foreign_keys("evidence_candidates"))
+    assert any(fk["referred_table"] == "evidence_candidates" for fk in inspector.get_foreign_keys("evidence"))
+
+    command.downgrade(config, "20250325_0020")
+    inspector = inspect(create_engine(database_url))
+    assert "promoted_evidence_id" in {column["name"] for column in inspector.get_columns("evidence_candidates")}
+    assert any(fk["referred_table"] == "evidence" for fk in inspector.get_foreign_keys("evidence_candidates"))
+
+    command.upgrade(config, "head")
