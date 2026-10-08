@@ -26,3 +26,6 @@ def test_alembic_metadata_matches_initial_schema(tmp_path, monkeypatch):
 
     command.upgrade(config, "head")
     command.check(config)
+    command.downgrade(config, "base")
+    command.upgrade(config, "head")
+    command.check(config)

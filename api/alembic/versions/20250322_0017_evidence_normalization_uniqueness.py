@@ -13,10 +13,13 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column(
-        "evidence",
-        sa.Column("normalization_hypothesis_id", sa.Integer(), sa.ForeignKey("hypotheses.id", ondelete="CASCADE"), nullable=True),
-    )
+    # SQLite requires table recreation to add a foreign key.
+    with op.batch_alter_table("evidence") as batch_op:
+        batch_op.add_column(sa.Column("normalization_hypothesis_id", sa.Integer(), nullable=True))
+        batch_op.create_foreign_key(
+            "fk_evidence_normalization_hypothesis", "hypotheses",
+            ["normalization_hypothesis_id"], ["id"], ondelete="CASCADE",
+        )
     op.create_index(
         "uq_evidence_normalization_hypothesis_cluster",
         "evidence",
@@ -27,4 +30,6 @@ def upgrade():
 
 def downgrade():
     op.drop_index("uq_evidence_normalization_hypothesis_cluster", table_name="evidence")
-    op.drop_column("evidence", "normalization_hypothesis_id")
+    with op.batch_alter_table("evidence") as batch_op:
+        batch_op.drop_constraint("fk_evidence_normalization_hypothesis", type_="foreignkey")
+        batch_op.drop_column("normalization_hypothesis_id")

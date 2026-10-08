@@ -5,6 +5,7 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -82,13 +83,14 @@ def _latest_economics_input(project_id: int, db: Session) -> tuple[dict | None, 
 
 
 def _manual_records(project_id: int, db: Session) -> dict:
-    return {
+    """Return JSON-safe presentation records, never ORM instances."""
+    return jsonable_encoder({
         "market": list(db.scalars(select(MarketEntity).where(MarketEntity.project_id == project_id).order_by(MarketEntity.id))),
         "competitor": list(db.scalars(select(Competitor).where(Competitor.project_id == project_id).order_by(Competitor.id))),
         "icp": list(db.scalars(select(ICPSegment).where(ICPSegment.project_id == project_id).order_by(ICPSegment.id))),
         "monetization": list(db.scalars(select(MonetizationAssumption).where(MonetizationAssumption.project_id == project_id).order_by(MonetizationAssumption.id))),
         "risk_map": list(db.scalars(select(RiskMapEntry).where(RiskMapEntry.project_id == project_id).order_by(RiskMapEntry.id))),
-    }
+    })
 
 
 def _serialize(persisted: ProjectVerdict, db: Session) -> ProjectVerdictRead:

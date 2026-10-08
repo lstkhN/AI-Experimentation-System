@@ -120,9 +120,13 @@ def run_research_pipeline(db: Session, run: AnalysisRun, provider, query: str, *
             current.status, current.started_at = "running", datetime.now(timezone.utc)
             for document in documents:
                 _heartbeat_or_raise(db, run_id, lease_token)
-                result = fetch(provider.fetch, document.url)
-                content = result["content"]
-                document.content = content if isinstance(content, str) else str(content)
+                # Search providers may already return document content and not
+                # implement a separate fetch API. Preserve that content rather
+                # than failing an otherwise valid legacy provider run.
+                if callable(getattr(provider, "fetch", None)):
+                    result = fetch(provider.fetch, document.url)
+                    content = result["content"]
+                    document.content = content if isinstance(content, str) else str(content)
                 document.fetched_at = datetime.now(timezone.utc)
                 document.stage_run_id = current.id
             _heartbeat_or_raise(db, run_id, lease_token)

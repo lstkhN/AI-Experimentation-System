@@ -1,13 +1,13 @@
 """add capital plan idempotency key
 
-Revision ID: 20250323_0018
+Revision ID: 20250323_0018_capital
 Revises: 20250322_0017
 Create Date: 2025-03-23
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "20250323_0018"
+revision = "20250323_0018_capital"
 down_revision = "20250322_0017"
 branch_labels = None
 depends_on = None

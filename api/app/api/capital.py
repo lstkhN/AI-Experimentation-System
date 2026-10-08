@@ -4,7 +4,7 @@ from typing import Annotated
 import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
@@ -144,12 +144,22 @@ def allocate(project_id: int, plan_id: int, data: AllocationRequest, db: Annotat
             requested_budget = plan.available_budget if data.available_budget is None else data.available_budget
             if requested_budget > plan.available_budget:
                 raise HTTPException(422, "available_budget cannot exceed the capital plan budget")
-            committed = db.scalar(select(func.coalesce(func.sum(CapitalAllocation.allocated_spend), 0)).where(CapitalAllocation.capital_plan_id == plan.id)) or 0
-            # A gate can be funded in several passes, but never receives its
-            # already committed spend again.
+            # ``reserved_budget`` is atomically claimed below. Summing
+            # allocations is not safe under concurrent SQLite transactions.
             gate_committed = dict(db.execute(select(CapitalAllocation.capital_gate_id, func.coalesce(func.sum(CapitalAllocation.allocated_spend), 0)).where(CapitalAllocation.capital_plan_id == plan.id).group_by(CapitalAllocation.capital_gate_id)).all())
-            available = min(max(0.0, plan.available_budget - float(committed)), requested_budget)
+            available = min(max(0.0, plan.available_budget - float(plan.reserved_budget)), requested_budget)
             result = allocate_capital(available, [{"gate_id": gate.id, "recommended_spend": max(0.0, gate.recommended_spend - float(gate_committed.get(gate.id, 0))), "gate_unlocked": gate.status == "UNLOCKED"} for gate in plan.gates])
+            reservation = sum(item["allocated_spend"] for item in result["allocations"])
+            if reservation and db.execute(
+                update(CapitalPlan)
+                .where(CapitalPlan.id == plan.id, CapitalPlan.reserved_budget + reservation <= CapitalPlan.available_budget)
+                .values(reserved_budget=CapitalPlan.reserved_budget + reservation)
+            ).rowcount != 1:
+                db.rollback()
+                if attempt == 4:
+                    raise HTTPException(409, "capital budget changed concurrently")
+                time.sleep(.01 * (attempt + 1))
+                continue
             for index, item in enumerate(result["allocations"]):
                 db.add(CapitalAllocation(capital_plan_id=plan.id, capital_gate_id=item["gate_id"], requested_spend=item["requested_spend"], allocated_spend=item["allocated_spend"], status=item["status"], result=result, idempotency_key=idempotency_key if index == 0 else None))
             record_audit_event(db, project_id=project_id, event_type="capital_plan.allocated", entity_type="capital_plan", entity_id=plan.id, payload=result)

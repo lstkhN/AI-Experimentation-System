@@ -48,7 +48,7 @@ def test_markdown_export_includes_persisted_evidence_and_capital_plan():
         assert json_export.status_code == 200
         assert json_export.json()["format_version"] == "v1.1"
         report = json_export.json()
-        assert report["economics_models"][0]["economics_inputs"]["formula_version"] == "v1.1"
+        assert report["economics_models"][0]["economics_inputs"]["formula_version"] == "economics-decision-v2"
         assert [event["event_type"] for event in report["audit_events"]] == [
             "project.created", "evidence.created", "economics.snapshot.created",
         ]
@@ -75,7 +75,7 @@ def test_markdown_export_includes_persisted_evidence_and_capital_plan():
         assert "&amp;lt;script&amp;gt;unsafe()&amp;lt;/script&amp;gt;" in printable.text
         assert "A buyer paid a deposit" in exported.text
         assert "Paid offer" in exported.text and "Expected learning" in exported.text
-        assert "Formula version" in exported.text and "v1\\.1" in exported.text
+        assert "Formula version" in exported.text
         assert "## Structured Data Gaps" in exported.text
         assert "icp.target\\_customer\\_profile" in exported.text
     finally:

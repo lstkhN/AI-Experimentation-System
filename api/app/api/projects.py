@@ -190,7 +190,7 @@ _RU_EXPORT_TEXT = {
     "assumption": "Допущение", "value": "Значение", "currency": "Валюта", "probability": "Вероятность", "impact": "Влияние", "mitigation": "Мера снижения", "owner": "Ответственный",
     "not_collected_as_structured_data": "не собрано как структурированные данные",
     "None.": "Нет данных.", "No ProjectDecision snapshot yet.": "Снимок решения по проекту пока отсутствует.",
-    "No capital steps recorded.": "Этапы капитала не записаны.", "Unknown: no manually supplied structured records.": "Неизвестно: нет вручную введённых структурированных записей.",
+    "No capital steps recorded.": "Этапы капитала не записаны.", "Unknown: no manually supplied structured records.": "Нет вручную введённых структурированных записей.",
 }
 _RU_EXPORT_ENUMS = {
     "queued": "в очереди", "running": "выполняется", "completed": "завершено", "failed": "ошибка",

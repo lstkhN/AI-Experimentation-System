@@ -56,11 +56,15 @@ def upgrade():
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()), sa.UniqueConstraint("claim_id", name="uq_research_verification_claim"),
     )
     op.create_index("ix_research_verifications_claim_id", "research_verifications", ["claim_id"])
-    # SQLite cannot add a table-level UNIQUE constraint after table creation.
-    # A unique index enforces the same invariant on every supported dialect.
-    op.add_column("evidence_candidates", sa.Column("promoted_evidence_id", sa.Integer(), sa.ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True))
+    # SQLite cannot add foreign keys with ALTER TABLE. Batch mode recreates
+    # these pre-existing tables while preserving the promotion constraints.
+    with op.batch_alter_table("evidence_candidates") as batch_op:
+        batch_op.add_column(sa.Column("promoted_evidence_id", sa.Integer(), nullable=True))
+        batch_op.create_foreign_key("fk_evidence_candidates_promoted_evidence", "evidence", ["promoted_evidence_id"], ["id"], ondelete="SET NULL")
     op.create_index("uq_evidence_candidates_promoted_evidence", "evidence_candidates", ["promoted_evidence_id"], unique=True)
-    op.add_column("evidence", sa.Column("candidate_id", sa.Integer(), sa.ForeignKey("evidence_candidates.id", ondelete="SET NULL"), nullable=True))
+    with op.batch_alter_table("evidence") as batch_op:
+        batch_op.add_column(sa.Column("candidate_id", sa.Integer(), nullable=True))
+        batch_op.create_foreign_key("fk_evidence_candidate", "evidence_candidates", ["candidate_id"], ["id"], ondelete="SET NULL")
     op.create_index("uq_evidence_candidate_id", "evidence", ["candidate_id"], unique=True)
     # A non-null hash key makes source promotion idempotent even when URL is NULL.
     op.add_column("evidence_sources", sa.Column("identity_key", sa.String(length=64), nullable=True))
@@ -75,9 +79,13 @@ def downgrade():
         batch_op.drop_constraint("uq_evidence_source_project_identity", type_="unique")
     op.drop_column("evidence_sources", "identity_key")
     op.drop_index("uq_evidence_candidate_id", table_name="evidence")
-    op.drop_column("evidence", "candidate_id")
+    with op.batch_alter_table("evidence") as batch_op:
+        batch_op.drop_constraint("fk_evidence_candidate", type_="foreignkey")
+        batch_op.drop_column("candidate_id")
     op.drop_index("uq_evidence_candidates_promoted_evidence", table_name="evidence_candidates")
-    op.drop_column("evidence_candidates", "promoted_evidence_id")
+    with op.batch_alter_table("evidence_candidates") as batch_op:
+        batch_op.drop_constraint("fk_evidence_candidates_promoted_evidence", type_="foreignkey")
+        batch_op.drop_column("promoted_evidence_id")
     op.drop_table("research_verifications")
     op.drop_table("research_claims")
     op.drop_table("research_documents")
