@@ -21,13 +21,56 @@ def test_claim_lease_heartbeat_and_conditional_completion():
     run = claim_next_run(db, now=now, lease_seconds=60)
     assert run is not None and run.status == "running" and run.attempt == 1
     assert run.lease_token
+    assert heartbeat(db, run.id, "", now=now) is False
+    assert complete_run(db, run.id, "", {"mode": "starter"}, now=now) is False
+    assert fail_run(db, run.id, "", {"code": "missing-token"}, now=now) is False
     assert heartbeat(db, run.id, "wrong", now=now) is False
     assert heartbeat(db, run.id, run.lease_token, now=now + timedelta(seconds=1)) is True
     assert complete_run(db, run.id, "wrong", {"mode": "starter"}, now=now) is False
     assert complete_run(db, run.id, run.lease_token, {"mode": "starter"}, now=now) is True
     assert db.get(AnalysisRun, run.id).status == "completed"
     db.close()
+
+
+def test_expired_lease_rejects_heartbeat_and_completion():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, expire_on_commit=False)()
+    now = datetime.now(timezone.utc)
+    project = Project(name="P")
+    db.add(project); db.flush()
+    run = AnalysisRun(project_id=project.id, status="running", attempt=1,
+                      lease_token="owner", lease_until=now - timedelta(seconds=1))
+    db.add(run); db.commit()
+
+    assert heartbeat(db, run.id, "owner", now=now) is False
+    assert complete_run(db, run.id, "owner", {"mode": "starter"}, now=now) is False
+    assert fail_run(db, run.id, "owner", {"code": "expired"}, now=now) is False
+    refreshed = db.get(AnalysisRun, run.id)
+    assert refreshed.status == "running" and refreshed.lease_token == "owner"
+    db.close()
     engine.dispose()
+
+
+def test_expired_final_attempt_is_terminalized_without_stale_owner_mutation():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine, expire_on_commit=False)()
+    now = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    project = Project(name="final retry")
+    db.add(project); db.flush()
+    run = AnalysisRun(project_id=project.id, status="running", attempt=2, max_attempts=2,
+                      lease_token="abandoned", lease_until=now - timedelta(seconds=1))
+    db.add(run); db.commit()
+
+    assert claim_next_run(db, now=now) is None
+    db.refresh(run)
+    assert run.status == "failed"
+    assert run.lease_token is None and run.lease_until is None
+    assert run.last_error == {"code": "lease_expired"}
+    assert complete_run(db, run.id, "abandoned", {"mode": "stale"}, now=now) is False
+    db.refresh(run)
+    assert run.status == "failed" and run.result is None
 
 
 def test_expired_lease_is_reclaimed_and_failure_uses_backoff_and_max_attempts():

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import CheckConstraint, Index, JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -64,6 +65,7 @@ class Project(Base):
     monetization_assumptions: Mapped[list[MonetizationAssumption]] = relationship(back_populates="project", cascade="all, delete-orphan")
     risk_map_entries: Mapped[list[RiskMapEntry]] = relationship(back_populates="project", cascade="all, delete-orphan")
     capital_plans: Mapped[list[CapitalPlan]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    research_documents: Mapped[list[ResearchDocument]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
 
 class ManualProvenanceMixin:
@@ -380,6 +382,81 @@ class AnalysisRun(Base):
     project: Mapped[Project] = relationship(back_populates="analysis_runs")
     hypotheses: Mapped[list[Hypothesis]] = relationship(back_populates="analysis_run")
     verdicts: Mapped[list[Verdict]] = relationship(back_populates="analysis_run")
+    research_stage_runs: Mapped[list[ResearchStageRun]] = relationship(back_populates="analysis_run", cascade="all, delete-orphan")
+
+
+class ResearchStageRun(Base):
+    """Durable checkpoint for one resumable research-pipeline stage."""
+
+    __tablename__ = "research_stage_runs"
+    __table_args__ = (
+        UniqueConstraint("analysis_run_id", "stage", name="uq_research_stage_run_stage"),
+        CheckConstraint("status IN ('pending', 'running', 'completed', 'failed')", name="ck_research_stage_runs_status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    analysis_run_id: Mapped[int] = mapped_column(ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
+    checkpoint: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    analysis_run: Mapped[AnalysisRun] = relationship(back_populates="research_stage_runs")
+    documents: Mapped[list[ResearchDocument]] = relationship(back_populates="stage_run", cascade="all, delete-orphan")
+
+
+class ResearchDocument(Base):
+    """A fetched research document retained independently from reviewable evidence."""
+
+    __tablename__ = "research_documents"
+    __table_args__ = (UniqueConstraint("analysis_run_id", "url", name="uq_research_document_run_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    analysis_run_id: Mapped[int] = mapped_column(ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    stage_run_id: Mapped[int | None] = mapped_column(ForeignKey("research_stage_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    project: Mapped[Project] = relationship(back_populates="research_documents")
+    stage_run: Mapped[ResearchStageRun | None] = relationship(back_populates="documents")
+    claims: Mapped[list[ResearchClaim]] = relationship(back_populates="document", cascade="all, delete-orphan")
+
+
+class ResearchClaim(Base):
+    __tablename__ = "research_claims"
+    __table_args__ = (UniqueConstraint("document_id", "claim", name="uq_research_claim_document_claim"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("research_documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    claim: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="candidate", server_default="candidate")
+    source_cluster: Mapped[str] = mapped_column(String(255), nullable=False, default="unknown", server_default="unknown")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    document: Mapped[ResearchDocument] = relationship(back_populates="claims")
+    verifications: Mapped[list[ResearchVerification]] = relationship(back_populates="claim", cascade="all, delete-orphan")
+
+
+class ResearchVerification(Base):
+    __tablename__ = "research_verifications"
+    __table_args__ = (UniqueConstraint("claim_id", name="uq_research_verification_claim"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    claim_id: Mapped[int] = mapped_column(ForeignKey("research_claims.id", ondelete="CASCADE"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    methodology_available: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="0")
+    source_quality: Mapped[float] = mapped_column(nullable=False, default=0.0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    claim: Mapped[ResearchClaim] = relationship(back_populates="verifications")
 
 
 class Hypothesis(Base):
@@ -413,9 +490,12 @@ class Hypothesis(Base):
 
 class EvidenceSource(Base):
     __tablename__ = "evidence_sources"
+    __table_args__ = (UniqueConstraint("project_id", "identity_key", name="uq_evidence_source_project_identity"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Stable URL/name-derived key used to atomically deduplicate promotion sources.
+    identity_key: Mapped[str] = mapped_column(String(64), nullable=False, default=lambda: uuid4().hex)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_type: Mapped[str] = mapped_column(String(50), default="other", nullable=False)
@@ -428,9 +508,17 @@ class EvidenceSource(Base):
 
 class Evidence(Base):
     __tablename__ = "evidence"
+    __table_args__ = (
+        Index("uq_evidence_candidate_id", "candidate_id", unique=True),
+        Index("uq_evidence_normalization_hypothesis_cluster", "normalization_hypothesis_id", "source_cluster", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int] = mapped_column(ForeignKey("evidence_sources.id", ondelete="CASCADE"), nullable=False, index=True)
+    # Set only for search-result normalization; enforces one cluster per hypothesis.
+    normalization_hypothesis_id: Mapped[int | None] = mapped_column(
+        ForeignKey("hypotheses.id", ondelete="CASCADE"), nullable=True
+    )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     direction: Mapped[str] = mapped_column(String(50), default="supporting", nullable=False)
     tier: Mapped[str] = mapped_column(String(2), default="E1", nullable=False)
@@ -445,6 +533,8 @@ class Evidence(Base):
     candidate_claim: Mapped[str | None] = mapped_column(Text, nullable=True)
     evidence_status: Mapped[str] = mapped_column(String(20), nullable=False, default="verified", server_default="verified")
     verification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # This unique link is the database-level backstop for concurrent promotion.
+    candidate_id: Mapped[int | None] = mapped_column(ForeignKey("evidence_candidates.id", ondelete="SET NULL"), nullable=True)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     source: Mapped[EvidenceSource] = relationship(back_populates="evidence")
@@ -453,6 +543,7 @@ class Evidence(Base):
 
 class EvidenceCandidate(Base):
     __tablename__ = "evidence_candidates"
+    __table_args__ = (Index("uq_evidence_candidates_promoted_evidence", "promoted_evidence_id", unique=True),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     hypothesis_id: Mapped[int | None] = mapped_column(ForeignKey("hypotheses.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -464,6 +555,7 @@ class EvidenceCandidate(Base):
     source_quality: Mapped[float] = mapped_column(default=0.0, nullable=False)
     source_cluster: Mapped[str] = mapped_column(String(255), default="unknown", nullable=False)
     observed_on: Mapped[date | None] = mapped_column(nullable=True)
+    promoted_evidence_id: Mapped[int | None] = mapped_column(ForeignKey("evidence.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 

@@ -32,6 +32,20 @@ def _eligible(now: datetime):
     )
 
 
+def _terminalize_expired_final_attempts(db: Session, now: datetime) -> None:
+    """Atomically fail abandoned runs that cannot be claimed again."""
+    changed = db.execute(update(AnalysisRun).where(
+        AnalysisRun.status == "running", AnalysisRun.attempt >= AnalysisRun.max_attempts,
+        AnalysisRun.lease_until.is_not(None), AnalysisRun.lease_until <= now,
+    ).execution_options(synchronize_session=False).values(
+        status="failed", completed_at=now, lease_until=None, lease_token=None,
+        heartbeat_at=now, last_error={"code": "lease_expired"},
+    )).rowcount
+    if changed:
+        db.commit()
+        db.expire_all()
+
+
 def claim_next_run(db: Session, *, lease_seconds: int = DEFAULT_LEASE_SECONDS,
                    now: datetime | None = None) -> AnalysisRun | None:
     """Atomically lease the oldest available or abandoned run.
@@ -41,6 +55,7 @@ def claim_next_run(db: Session, *, lease_seconds: int = DEFAULT_LEASE_SECONDS,
     unavailable.
     """
     now = now or utcnow()
+    _terminalize_expired_final_attempts(db, now)
     for _ in range(8):
         statement = select(AnalysisRun.id).where(_eligible(now)).order_by(AnalysisRun.available_at, AnalysisRun.id).limit(1)
         if db.bind is not None and db.bind.dialect.name == "postgresql":
@@ -68,6 +83,7 @@ def claim_run(db: Session, run_id: int, *, lease_seconds: int = DEFAULT_LEASE_SE
               now: datetime | None = None) -> AnalysisRun | None:
     """Claim one particular run; used by the manual compatibility endpoint."""
     now = now or utcnow()
+    _terminalize_expired_final_attempts(db, now)
     token = token_urlsafe(32)
     claimed = db.execute(
         update(AnalysisRun).where(AnalysisRun.id == run_id, _eligible(now)).execution_options(synchronize_session=False).values(
@@ -87,8 +103,11 @@ def claim_run(db: Session, run_id: int, *, lease_seconds: int = DEFAULT_LEASE_SE
 def heartbeat(db: Session, run_id: int, lease_token: str, *, lease_seconds: int = DEFAULT_LEASE_SECONDS,
               now: datetime | None = None, commit: bool = True) -> bool:
     now = now or utcnow()
+    if not lease_token:
+        return False
     changed = db.execute(update(AnalysisRun).where(
         AnalysisRun.id == run_id, AnalysisRun.status == "running", AnalysisRun.lease_token == lease_token,
+        AnalysisRun.lease_until.is_not(None), AnalysisRun.lease_until > now,
     ).execution_options(synchronize_session=False).values(heartbeat_at=now, lease_until=now + timedelta(seconds=lease_seconds))).rowcount == 1
     if commit:
         (db.commit() if changed else db.rollback())
@@ -100,8 +119,11 @@ def heartbeat(db: Session, run_id: int, lease_token: str, *, lease_seconds: int 
 def complete_run(db: Session, run_id: int, lease_token: str, result: dict[str, object], *,
                  now: datetime | None = None, commit: bool = True) -> bool:
     now = now or utcnow()
+    if not lease_token:
+        return False
     changed = db.execute(update(AnalysisRun).where(
         AnalysisRun.id == run_id, AnalysisRun.status == "running", AnalysisRun.lease_token == lease_token,
+        AnalysisRun.lease_until.is_not(None), AnalysisRun.lease_until > now,
     ).execution_options(synchronize_session=False).values(status="completed", result=result, completed_at=now, lease_until=None,
              lease_token=None, heartbeat_at=now, last_error=None)).rowcount == 1
     if commit:
@@ -116,8 +138,11 @@ def fail_run(db: Session, run_id: int, lease_token: str, error: dict[str, object
              commit: bool = True, result: dict[str, object] | None = None, terminal: bool = False) -> bool:
     """Release an owned run, scheduling exponential retry unless exhausted."""
     now = now or utcnow()
+    if not lease_token:
+        return False
     run = db.scalar(select(AnalysisRun).where(
         AnalysisRun.id == run_id, AnalysisRun.status == "running", AnalysisRun.lease_token == lease_token,
+        AnalysisRun.lease_until.is_not(None), AnalysisRun.lease_until > now,
     ))
     if run is None:
         if commit:
@@ -133,6 +158,7 @@ def fail_run(db: Session, run_id: int, lease_token: str, error: dict[str, object
         values.update(status="queued", available_at=now + timedelta(seconds=retry_delay_seconds * (2 ** max(run.attempt - 1, 0))))
     changed = db.execute(update(AnalysisRun).where(
         AnalysisRun.id == run_id, AnalysisRun.status == "running", AnalysisRun.lease_token == lease_token,
+        AnalysisRun.lease_until.is_not(None), AnalysisRun.lease_until > now,
     ).execution_options(synchronize_session=False).values(**values)).rowcount == 1
     if commit:
         (db.commit() if changed else db.rollback())

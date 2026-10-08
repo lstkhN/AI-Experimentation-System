@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
+
 import httpx
 
 from app.services.openai_orchestrator import OpenAIOrchestrator
-from app.services.research import TavilyResearchProvider
+from app.services.research import ResearchResult, TavilyResearchProvider
 
 
 class FailingClient:
@@ -52,6 +54,17 @@ def test_tavily_provider_posts_and_parses_results():
     assert request_payload["api_key"] == "test-key"
     assert request_payload["query"] == "market demand"
     assert request_payload["max_results"] == 3
+
+
+def test_research_result_normalizes_nested_provenance_datetimes():
+    result = ResearchResult(
+        "Report", "https://example.test", "claim",
+        source_metadata={"retrieved": datetime(2025, 1, 1, tzinfo=timezone.utc), "events": [datetime(2025, 1, 2)]},
+    )
+
+    assert result.to_dict()["source_metadata"] == {
+        "retrieved": "2025-01-01T00:00:00+00:00", "events": ["2025-01-02T00:00:00"]
+    }
 
 
 def test_openai_orchestrator_parses_structured_hypotheses():

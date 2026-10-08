@@ -5,9 +5,20 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 import httpx
+
+
+def json_normalize(value: Any) -> Any:
+    """Recursively convert datetimes in provider payloads to JSON values."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): json_normalize(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_normalize(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -20,18 +31,22 @@ class ResearchResult:
     score: float | None = None
     # Provenance is captured at fetch time so normalization replays do not
     # manufacture a new retrieval time.
-    fetched_at: str | None = None
+    fetched_at: datetime | str | None = None
     source_metadata: dict[str, Any] | None = None
     content_truncated: bool = False
     original_content_length: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """Return JSON-safe provider output, including programmatic timestamps."""
+        return json_normalize(asdict(self))
 
 
 class ResearchProvider(Protocol):
     def search(self, query: str, *, max_results: int = 5) -> list[ResearchResult]:
         """Return normalized search results for *query*."""
+
+    def fetch(self, url: str) -> str:
+        """Return the fetched text for one search-result URL."""
 
 
 MAX_RESULTS = 10
@@ -85,6 +100,17 @@ class TavilyResearchProvider:
             response = client.post(self.base_url, json=payload)
             response.raise_for_status()
             return self.parse_results(response.json())
+
+    def fetch(self, url: str) -> str:
+        """Fetch a result page so durable documents contain retrieved content."""
+        if self._client is not None:
+            response = self._client.get(url)
+            response.raise_for_status()
+            return response.text[:MAX_CONTENT_LENGTH]
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return response.text[:MAX_CONTENT_LENGTH]
 
     @staticmethod
     def parse_results(payload: Any) -> list[ResearchResult]:

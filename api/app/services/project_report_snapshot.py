@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (AnalysisRun, CapitalPlan, Competitor, EconomicsModel, ExperimentProposal,
                            ExperimentRun, Hypothesis, ICPSegment, MarketEntity, MonetizationAssumption,
-                           Project, ProjectVerdict, Verdict)
+                           Project, ProjectVerdict, ResearchDocument, ResearchStageRun, Verdict)
 from app.engines.project_verdict import ProjectVerdictEngine
 
 
@@ -46,12 +46,36 @@ def _economics(project_id: int, db: Session) -> tuple[dict[str, Any] | None, Eco
     return {"snapshot_id": snapshot.id, "inputs": snapshot.economics_inputs, "result": snapshot.result, "reliability": snapshot.reliability}, snapshot
 
 
+def _persisted_research(db: Session, run: AnalysisRun | None) -> list[dict[str, Any]]:
+    """Render durable documents (and their stage checkpoint) for a report."""
+    if run is None:
+        return []
+    stages = {stage.id: stage for stage in db.scalars(select(ResearchStageRun).where(
+        ResearchStageRun.analysis_run_id == run.id
+    ))}
+    documents = list(db.scalars(select(ResearchDocument).where(
+        ResearchDocument.analysis_run_id == run.id
+    ).order_by(ResearchDocument.id)))
+    if documents:
+        return [{
+            "title": document.title or document.url,
+            "url": document.url,
+            "content": document.content or "",
+            "fetched_at": document.fetched_at.isoformat() if document.fetched_at else None,
+            "source_metadata": document.source_metadata,
+            "stage": stages[document.stage_run_id].stage if document.stage_run_id in stages else None,
+            "stage_status": stages[document.stage_run_id].status if document.stage_run_id in stages else None,
+        } for document in documents]
+    # Compatibility with reports produced before durable research artifacts.
+    return (run.result or {}).get("research_results", [])
+
+
 def save_project_report_snapshot(db: Session, project: Project, *, analysis_run: AnalysisRun | None = None) -> ProjectVerdict:
     """Create an immutable current report snapshot without any LLM arithmetic."""
     economics, economics_model = _economics(project.id, db)
     run = analysis_run or db.scalar(select(AnalysisRun).where(AnalysisRun.project_id == project.id)
                                     .order_by(AnalysisRun.created_at.desc(), AnalysisRun.id.desc()).limit(1))
-    research = (run.result or {}).get("research_results", []) if run else []
+    research = _persisted_research(db, run)
     proposals = {item.id: item for item in db.scalars(select(ExperimentProposal).where(
         ExperimentProposal.project_id == project.id).order_by(ExperimentProposal.id))}
     experiments = [{"id": item.id, "proposal_id": item.proposal_id, "status": item.status, "title": item.title,

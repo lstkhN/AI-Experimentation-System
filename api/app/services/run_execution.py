@@ -11,13 +11,14 @@ from app.db.models import AnalysisRun, Evidence, EvidenceCandidate, EvidenceLink
 from app.engines.evidence import Evidence as EngineEvidence
 from app.engines.verdict import VerdictEngine
 from app.services.audit import record_audit_event
-from app.services.evidence_normalization import normalize_research_results
+from app.services.evidence_normalization import canonical_url, normalize_research_results, source_cluster
 from app.services.hypothesis_generator import starter_hypotheses
 from app.services.openai_orchestrator import OpenAIOrchestrator
 from app.services.project_report_snapshot import save_project_report_snapshot
-from app.services.research import TavilyResearchProvider
+from app.services.research import ResearchResult, TavilyResearchProvider
+from app.services.research_pipeline.orchestration import run_research_pipeline
 from app.settings import AnalysisSettings
-from app.workers.run_worker import complete_run, fail_run
+from app.workers.run_worker import complete_run, fail_run, heartbeat
 
 
 class AnalysisLimitExceeded(ValueError):
@@ -62,14 +63,27 @@ def execute_claimed_run(db: Session, run: AnalysisRun, *, research_provider=None
             if settings.max_tool_calls < 2:
                 raise AnalysisLimitExceeded("tool call limit reached")
             query = " ".join(part for part in (project.name, project.description or "") if part)
-            research = provider.search(query)
+            # The pipeline writes stage checkpoints and source artifacts before synthesis,
+            # so a retried leased run resumes completed research stages.
+            documents = run_research_pipeline(db, run, provider, query, lease_token=token)
+            # An empty completed search is authoritative; never issue a second provider request.
+            research = [
+                ResearchResult(title=item.title or item.url, url=item.url, content=item.content or "",
+                               source_metadata=item.source_metadata)
+                for item in documents
+            ]
             research_calls, tool_calls = 1, 1
             context = {
                 "name": project.name, "description": project.description, "geography": project.geography,
                 "business_type": project.business_type, "budget": project.budget, "deadline_days": project.deadline_days,
                 "language": project.language, "known_facts": project.known_facts or [], "run_inputs": run.inputs or {},
             }
+            # Refresh ownership immediately before and after the potentially long LLM call.
+            if not heartbeat(db, run.id, token):
+                return db.get(AnalysisRun, run.id)
             items = llm.generate_hypotheses(context, research)
+            if not heartbeat(db, run.id, token):
+                return db.get(AnalysisRun, run.id)
             tool_calls += 1
             usage = _usage(research_calls, tool_calls, getattr(llm, "last_usage", None))
             if Decimal(str(usage["cost_usd"])) > settings.cost_cap_usd:
@@ -83,6 +97,8 @@ def execute_claimed_run(db: Session, run: AnalysisRun, *, research_provider=None
         else:
             items = starter_hypotheses(project)
             result = {"mode": "starter"}
+        if not heartbeat(db, run.id, token):
+            return db.get(AnalysisRun, run.id)
         usage = _usage(research_calls, tool_calls, getattr(llm, "last_usage", None))
         result.update(hypotheses_created=len(items), hypotheses=[item["statement"] for item in items], usage=usage, cost_usd=usage["cost_usd"])
         hypotheses: list[Hypothesis] = []
@@ -104,10 +120,12 @@ def execute_claimed_run(db: Session, run: AnalysisRun, *, research_provider=None
                 for source in research:
                     claim = getattr(source, "content", None) or getattr(source, "snippet", None) or ""
                     if claim:
+                        source_url = getattr(source, "url", None)
+                        normalized_url = canonical_url(source_url) if source_url else None
                         db.add(EvidenceCandidate(project_id=run.project_id, hypothesis_id=hypothesis.id,
-                            claim=str(claim), source_name=str(getattr(source, "title", None) or getattr(source, "url", "research source")),
-                            url=getattr(source, "url", None), source_quality=0.0,
-                            source_cluster=str(getattr(source, "source_cluster", None) or "unknown")))
+                            claim=str(claim), source_name=str(getattr(source, "title", None) or source_url or "research source"),
+                            url=source_url, source_quality=0.0,
+                            source_cluster=source_cluster(normalized_url) if normalized_url else "unknown"))
                 normalize_research_results(db, project=project, hypothesis=hypothesis, results=research, analysis_run_id=run.id)
         db.flush()
         verdict_summaries = []

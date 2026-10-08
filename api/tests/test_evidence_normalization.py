@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -64,8 +66,8 @@ def test_normalization_retains_bounded_provenance_for_unreviewed_snippets():
             "Unreviewed result",
             "https://example.test/report?utm_source=search",
             original,
-            fetched_at="2025-02-20T10:00:00+00:00",
-            source_metadata={"provider": "fixture", "collection": "search"},
+            fetched_at=datetime(2025, 2, 20, 10, 0),
+            source_metadata={"provider": "fixture", "collection": "search", "nested": {"at": datetime(2025, 2, 20, 11, 0)}},
         )
         normalize_research_results(session, project=project, hypothesis=hypothesis, results=[result])
         session.commit()
@@ -73,7 +75,9 @@ def test_normalization_retains_bounded_provenance_for_unreviewed_snippets():
         source = session.scalar(select(EvidenceSource))
         provenance = source.source_metadata["research_results"][0]
         assert provenance["fetched_at"] == "2025-02-20T10:00:00+00:00"
-        assert provenance["source_metadata"] == {"provider": "fixture", "collection": "search"}
+        assert provenance["source_metadata"] == {
+            "provider": "fixture", "collection": "search", "nested": {"at": "2025-02-20T11:00:00"}
+        }
         assert provenance["url"] == "https://example.test/report"
         assert provenance["content_truncated"] is True
         assert provenance["original_content_length"] == len(original)
@@ -83,6 +87,34 @@ def test_normalization_retains_bounded_provenance_for_unreviewed_snippets():
         }
         evidence = session.scalar(select(Evidence))
         assert (evidence.direction, evidence.tier, evidence.relevance) == ("neutral", "E0", 0.0)
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_normalization_uses_canonical_url_identity_for_duplicate_results():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        project = Project(name="Research")
+        hypothesis = Hypothesis(project=project, statement="Teams will pay")
+        session.add(hypothesis)
+        session.commit()
+
+        result = ResearchResult("Report", "https://example.test/report?utm_source=first", "claim")
+        normalize_research_results(session, project=project, hypothesis=hypothesis, results=[result])
+        session.commit()
+        source = session.scalar(select(EvidenceSource))
+        first_identity = source.identity_key
+
+        duplicate = ResearchResult("Report", "https://example.test/report?utm_source=second", "claim")
+        summary = normalize_research_results(session, project=project, hypothesis=hypothesis, results=[duplicate])
+        session.commit()
+        sources = list(session.scalars(select(EvidenceSource)))
+        assert summary.sources_created == 0
+        assert len(sources) == 1
+        assert sources[0].identity_key == first_identity
     finally:
         session.close()
         Base.metadata.drop_all(engine)

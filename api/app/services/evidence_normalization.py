@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from hashlib import sha256
 from typing import Iterable
+
+from sqlalchemy.exc import IntegrityError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Evidence, EvidenceLink, EvidenceSource, Hypothesis, Project
-from app.services.research import MAX_CONTENT_LENGTH, ResearchResult
+from app.services.research import MAX_CONTENT_LENGTH, ResearchResult, json_normalize
 
 _TRACKING_PARAMETERS = {"gclid", "fbclid", "mc_cid", "mc_eid"}
 MAX_TITLE_LENGTH = 500
@@ -41,6 +45,12 @@ def source_cluster(url: str) -> str:
     return urlsplit(url).hostname.lower().removeprefix("www.")  # type: ignore[union-attr]
 
 
+def canonical_source_cluster(url: str | None) -> str:
+    """Derive the sole URL-based source cluster used by research workflows."""
+    normalized_url = canonical_url(url) if url else None
+    return source_cluster(normalized_url) if normalized_url else "unknown"
+
+
 def _snippet(result: ResearchResult) -> tuple[str, bool, int]:
     """Bound snippet retention even for results supplied outside our adapter."""
     content = result.content if isinstance(result.content, str) else ""
@@ -59,6 +69,20 @@ def _classification() -> dict[str, str]:
     return {"direction": "neutral", "tier": "E0", "relation": "unknown", "reason": "unreviewed_search_snippet"}
 
 
+def _provenance_timestamp(value: datetime | str | None) -> str | None:
+    """Return a JSON-safe, UTC timestamp for persisted provider provenance."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return value
+
+
+def _source_identity(normalized_url: str) -> str:
+    """Derive the persistent source key from the canonical, not raw, URL."""
+    return sha256(f"url:{normalized_url}".encode("utf-8")).hexdigest()
+
+
 def _provenance(result: ResearchResult, normalized_url: str, cluster: str, analysis_run_id: int | None) -> dict:
     content, truncated, original_length = _snippet(result)
     provenance = {
@@ -68,8 +92,8 @@ def _provenance(result: ResearchResult, normalized_url: str, cluster: str, analy
         "url": normalized_url,
         "content": content,
         "score": result.score,
-        "fetched_at": result.fetched_at,
-        "source_metadata": dict(result.source_metadata or {}),
+        "fetched_at": _provenance_timestamp(result.fetched_at),
+        "source_metadata": json_normalize(dict(result.source_metadata or {})),
         "content_truncated": truncated,
         "original_content_length": original_length,
         "canonical_url": normalized_url,
@@ -122,50 +146,75 @@ def normalize_research_results(
         provenance = _provenance(result, normalized_url, cluster, analysis_run_id)
         source = source_by_url.get(normalized_url)
         if source is None:
-            source = EvidenceSource(
-                project_id=project.id,
-                name=result.title.strip()[:MAX_TITLE_LENGTH] or cluster,
-                url=normalized_url,
-                source_type="research",
-                source_metadata={"research_results": [provenance], "canonical_url": normalized_url},
-            )
-            db.add(source)
-            db.flush()
+            # The database identity is derived from the canonical URL so two
+            # workers normalizing tracking variants converge on one source.
+            identity_key = _source_identity(normalized_url)
+            try:
+                with db.begin_nested():
+                    source = EvidenceSource(
+                        project_id=project.id,
+                        identity_key=identity_key,
+                        name=result.title.strip()[:MAX_TITLE_LENGTH] or cluster,
+                        url=normalized_url,
+                        source_type="research",
+                        source_metadata={"research_results": [provenance], "canonical_url": normalized_url},
+                    )
+                    db.add(source)
+                    db.flush()
+                created_sources += 1
+            except IntegrityError:
+                source = db.scalar(select(EvidenceSource).where(
+                    EvidenceSource.project_id == project.id, EvidenceSource.identity_key == identity_key
+                ))
+                if source is None:
+                    raise
+                _append_provenance(source, provenance)
             source_by_url[normalized_url] = source
-            created_sources += 1
         else:
             _append_provenance(source, provenance)
         representative_by_cluster.setdefault(cluster, source)
 
     created_evidence = reused_evidence = 0
     for cluster, source in representative_by_cluster.items():
-        evidence = db.scalar(
-            select(Evidence)
-            .join(EvidenceLink)
-            .where(Evidence.source_cluster == cluster, EvidenceLink.hypothesis_id == hypothesis.id)
-        )
+        evidence = db.scalar(select(Evidence).where(
+            Evidence.normalization_hypothesis_id == hypothesis.id,
+            Evidence.source_cluster == cluster,
+        ))
         if evidence is None:
             provenance = (source.source_metadata or {}).get("research_results", [{}])[0]
             content = provenance.get("content") or provenance.get("title") or source.name
             classification = provenance.get("classification") or _classification()
-            evidence = Evidence(
-                source=source,
-                # The snippet is a candidate claim, not verified evidence.
-                content=content,
-                candidate_claim=content,
-                evidence_status="candidate",
-                verification_reason=classification["reason"],
-                direction=classification["direction"],
-                tier=classification["tier"],
-                category="research",
-                relevance=0.0,
-                source_quality=0.0,
-                source_cluster=cluster,
-                independent=True,
-            )
-            evidence.links.append(EvidenceLink(hypothesis=hypothesis, relation=classification["relation"]))
-            db.add(evidence)
-            created_evidence += 1
+            try:
+                # The unique key is the concurrency backstop for the prior read.
+                with db.begin_nested():
+                    evidence = Evidence(
+                        source=source,
+                        normalization_hypothesis_id=hypothesis.id,
+                        # The snippet is a candidate claim, not verified evidence.
+                        content=content,
+                        candidate_claim=content,
+                        evidence_status="candidate",
+                        verification_reason=classification["reason"],
+                        direction=classification["direction"],
+                        tier=classification["tier"],
+                        category="research",
+                        relevance=0.0,
+                        source_quality=0.0,
+                        source_cluster=cluster,
+                        independent=True,
+                    )
+                    evidence.links.append(EvidenceLink(hypothesis=hypothesis, relation=classification["relation"]))
+                    db.add(evidence)
+                    db.flush()
+                created_evidence += 1
+            except IntegrityError:
+                evidence = db.scalar(select(Evidence).where(
+                    Evidence.normalization_hypothesis_id == hypothesis.id,
+                    Evidence.source_cluster == cluster,
+                ))
+                if evidence is None:
+                    raise
+                reused_evidence += 1
         else:
             reused_evidence += 1
 
