@@ -24,9 +24,15 @@ class StructuredReportGapsService:
         "risk_map": ("risk_register", "probability_and_impact", "mitigations_and_owners"),
     }
 
-    def build(self, language: LanguageCode) -> dict:
+    def build(self, language: LanguageCode, manual_records: dict[ReportSection, list] | None = None) -> dict:
+        """Overlay attributable manual records onto the standard gap inventory."""
+        manual_records = manual_records or {}
         sections = {
-            section: {
+            section: ({
+                "status": "collected",
+                "records": manual_records[section],
+                "data_gaps": [],
+            } if manual_records.get(section) else {
                 "status": "unknown",
                 "data_gaps": [
                     {
@@ -37,7 +43,7 @@ class StructuredReportGapsService:
                     }
                     for field in fields
                 ],
-            }
+            })
             for section, fields in self._missing_fields.items()
         }
         return {
@@ -47,5 +53,5 @@ class StructuredReportGapsService:
         }
 
 
-def build_structured_report_gaps(language: LanguageCode) -> dict:
-    return StructuredReportGapsService().build(language)
+def build_structured_report_gaps(language: LanguageCode, manual_records: dict[ReportSection, list] | None = None) -> dict:
+    return StructuredReportGapsService().build(language, manual_records)

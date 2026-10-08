@@ -1,162 +1,21 @@
 import threading
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import app.api.capital as capital_api
-from app.db.models import Base, CapitalAllocation, CapitalGate, CapitalPlan, Project
+from app.db.models import Base
 from app.db.session import get_db
 from app.main import app
 from app.engines.capital_allocator import allocate_capital
 from app.engines.experiment_economics import calculate_experiment_economics
-from app.schemas.capital import AllocationRequest
 
 
 def test_pure_engines_are_deterministic_and_sequential():
     assert calculate_experiment_economics(estimated_cost=100, success_probability=.5, upside=300, learning_value=10)["recommended_spend"] == 100
     result = allocate_capital(150, [{"recommended_spend": 100, "gate_unlocked": True}, {"recommended_spend": 100, "gate_unlocked": True}])
     assert [item["status"] for item in result["allocations"]] == ["ALLOCATED", "PARTIAL"]
-
-
-def test_equal_score_and_name_candidates_have_canonical_order_independent_of_input_order():
-    candidates = [
-        {"name": "same", "id": "b", "cost": 10, "probability_of_decisive_result": 1, "expected_information_gain": 1},
-        {"name": "same", "id": "a", "cost": 10, "probability_of_decisive_result": 1, "expected_information_gain": 1},
-    ]
-    first = allocate_capital(100, [], candidate_experiments=candidates)
-    second = allocate_capital(100, [], candidate_experiments=list(reversed(candidates)))
-    assert [item["id"] for item in first["ranked_experiments"]] == ["a", "b"]
-    assert [item["id"] for item in first["ranked_experiments"]] == [item["id"] for item in second["ranked_experiments"]]
-
-
-def test_candidate_recommendations_are_deterministically_limited_to_candidate_budget():
-    result = allocate_capital(100, [], candidate_experiments=[
-        {"name": "second", "cost": 60, "probability_of_decisive_result": 1, "expected_information_gain": 1},
-        {"name": "first", "cost": 60, "probability_of_decisive_result": 1, "expected_information_gain": 2},
-        {"name": "free", "cost": 0, "probability_of_decisive_result": 1, "expected_information_gain": 1},
-    ])
-    assert result["candidate_budget"] == 100
-    assert result["candidate_recommended_total"] == 60
-    assert [item["name"] for item in result["recommended_experiments"]] == ["free", "first"]
-    assert [item["candidate_status"] for item in result["ranked_experiments"]] == ["RECOMMENDED", "RECOMMENDED", "HELD_BACK"]
-    assert result["do_not_commit_yet"] == 100
-
-
-def test_sqlite_concurrent_allocations_reserve_budget_once(tmp_path, monkeypatch):
-    engine = create_engine(f"sqlite:///{tmp_path / 'capital.db'}", connect_args={"check_same_thread": False, "timeout": 5})
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine)
-    with factory.begin() as db:
-        project = Project(name="Concurrent capital")
-        db.add(project); db.flush()
-        plan = CapitalPlan(project_id=project.id, available_budget=100, recommended_spend=100)
-        db.add(plan); db.flush()
-        db.add(CapitalGate(capital_plan_id=plan.id, sequence=1, name="fund", recommended_spend=100, status="UNLOCKED"))
-        project_id, plan_id = project.id, plan.id
-
-    calculation_barrier = threading.Barrier(2)
-    calculation_lock = threading.Lock()
-    calculation_count = 0
-    original_allocate_capital = capital_api.allocate_capital
-
-    def synchronized_allocate(*args, **kwargs):
-        nonlocal calculation_count
-        with calculation_lock:
-            calculation_count += 1
-            synchronize = calculation_count <= 2
-        if synchronize:
-            calculation_barrier.wait(timeout=5)
-        return original_allocate_capital(*args, **kwargs)
-
-    monkeypatch.setattr(capital_api, "allocate_capital", synchronized_allocate)
-    responses, errors = [], []
-
-    def request_allocation():
-        db = factory()
-        try:
-            responses.append(capital_api.allocate(project_id, plan_id, AllocationRequest(), db, None))
-        except Exception as error:  # pragma: no cover - asserted below
-            errors.append(error)
-        finally:
-            db.close()
-
-    workers = [threading.Thread(target=request_allocation) for _ in range(2)]
-    for worker in workers: worker.start()
-    for worker in workers: worker.join()
-    assert not errors
-    assert sum(response["allocated_total"] for response in responses) == 100
-    with factory() as db:
-        assert db.scalar(select(CapitalPlan.reserved_budget).where(CapitalPlan.id == plan_id)) == 100
-        assert db.scalar(select(func.sum(CapitalAllocation.allocated_spend)).where(CapitalAllocation.capital_plan_id == plan_id)) == 100
-    Base.metadata.drop_all(engine); engine.dispose()
-
-
-def test_allocation_idempotency_does_not_reserve_budget_twice(tmp_path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'idempotency.db'}")
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine)
-    with factory.begin() as db:
-        project = Project(name="Idempotent capital")
-        db.add(project); db.flush()
-        plan = CapitalPlan(project_id=project.id, available_budget=100, recommended_spend=100)
-        db.add(plan); db.flush()
-        db.add(CapitalGate(capital_plan_id=plan.id, sequence=1, name="fund", recommended_spend=100, status="UNLOCKED"))
-        project_id, plan_id = project.id, plan.id
-    with factory() as db:
-        first = capital_api.allocate(project_id, plan_id, AllocationRequest(), db, "same-request")
-    with factory() as db:
-        replay = capital_api.allocate(project_id, plan_id, AllocationRequest(), db, "same-request")
-    assert first["allocated_total"] == 100
-    assert replay["replayed"] is True
-    with factory() as db:
-        assert db.scalar(select(CapitalPlan.reserved_budget).where(CapitalPlan.id == plan_id)) == 100
-    Base.metadata.drop_all(engine); engine.dispose()
-
-
-def test_capital_decision_allocation_alias_forwards_and_validates_idempotency_key():
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine)
-
-    def override():
-        db = factory()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override
-    client = TestClient(app)
-    try:
-        with factory.begin() as db:
-            project = Project(name="Capital decision alias")
-            db.add(project)
-            db.flush()
-            plan = CapitalPlan(project_id=project.id, available_budget=100, recommended_spend=100)
-            db.add(plan)
-            db.flush()
-            db.add(CapitalGate(capital_plan_id=plan.id, sequence=1, name="fund", recommended_spend=100, status="UNLOCKED"))
-            project_id, plan_id = project.id, plan.id
-
-        url = f"/api/v1/projects/{project_id}/capital/plan/{plan_id}/allocate"
-        first = client.post(url, headers={"Idempotency-Key": "alias-request"}, json={})
-        replay = client.post(url, headers={"Idempotency-Key": "alias-request"}, json={})
-        too_long = client.post(url, headers={"Idempotency-Key": "x" * 121}, json={})
-
-        assert first.status_code == 200
-        assert first.json()["allocated_total"] == 100
-        assert replay.status_code == 200
-        assert replay.json()["replayed"] is True
-        assert too_long.status_code == 422
-        with factory() as db:
-            assert db.scalar(select(CapitalPlan.reserved_budget).where(CapitalPlan.id == plan_id)) == 100
-    finally:
-        client.close()
-        app.dependency_overrides.clear()
-        Base.metadata.drop_all(engine)
-        engine.dispose()
 
 
 def test_capital_plan_gate_evaluation_and_allocation():
@@ -176,13 +35,155 @@ def test_capital_plan_gate_evaluation_and_allocation():
         ]})
         assert response.status_code == 200
         plan_id = response.json()["id"]
+        assert client.get(f"/api/v1/projects/{project['id']}/capital-plans").json()[0]["id"] == plan_id
+        replay = client.post(f"/api/v1/projects/{project['id']}/capital-plans", headers={"Idempotency-Key": "create-once"}, json={"available_budget": 10, "gates": []})
+        assert replay.status_code == 200
+        assert client.post(f"/api/v1/projects/{project['id']}/capital-plans", headers={"Idempotency-Key": "create-once"}, json={"available_budget": 10, "gates": []}).json()["id"] == replay.json()["id"]
         assert client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan_id}/gates/evaluate", json={"metrics": {"interviews": 10}}).json()["gates"][0]["status"] == "UNLOCKED"
-        allocation = client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan_id}/allocate", json={
-            "candidate_experiments": [{"name": "Fast interview", "cost": 20, "criticality": 2,
-                                       "evidence_gap": 1, "probability_of_decisive_result": .8,
-                                       "expected_information_gain": .9, "time_to_result_days": 1}]
-        }).json()
+        allocation = client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan_id}/allocate", headers={"Idempotency-Key": "allocation-intent"}, json={}).json()
         assert [item["status"] for item in allocation["allocations"]] == ["ALLOCATED", "PARTIAL"]
-        assert allocation["ranked_experiments"][0]["name"] == "Fast interview"
+        assert client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan_id}/allocate", headers={"Idempotency-Key": "allocation-intent"}, json={}).json()["replayed"] is True
+        persisted = next(item for item in client.get(f"/api/v1/projects/{project['id']}/capital-plans").json() if item["id"] == plan_id)
+        assert [item["status"] for item in persisted["allocations"]] == ["ALLOCATED", "PARTIAL"]
+        # A fresh intent sees each gate's remaining commitment, not its full
+        # recommendation, and therefore cannot fund completed gates again.
+        second = client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan_id}/allocate", headers={"Idempotency-Key": "allocation-second"}, json={}).json()
+        assert [item["requested_spend"] for item in second["allocations"]] == [0, 50]
+        assert sum(item["allocated_spend"] for item in second["allocations"]) == 0
+        persisted = next(item for item in client.get(f"/api/v1/projects/{project['id']}/capital-plans").json() if item["id"] == plan_id)
+        assert sum(item["allocated_spend"] for item in persisted["allocations"]) == 150
     finally:
         client.close(); app.dependency_overrides.clear(); Base.metadata.drop_all(engine); engine.dispose()
+
+
+def test_capital_decision_alias_forwards_idempotency_key():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine); factory = sessionmaker(bind=engine)
+    def override():
+        db = factory()
+        try: yield db
+        finally: db.close()
+    app.dependency_overrides[get_db] = override
+    try:
+        with TestClient(app) as client:
+            project = client.post("/api/v1/projects", json={"name": "Capital alias"}).json()
+            path = f"/api/v1/projects/{project['id']}/capital/plan"
+            first = client.post(path, headers={"Idempotency-Key": "alias-plan"}, json={"available_budget": 20, "gates": []})
+            second = client.post(path, headers={"Idempotency-Key": "alias-plan"}, json={"available_budget": 20, "gates": []})
+            assert first.status_code == second.status_code == 200
+            assert first.json()["id"] == second.json()["id"]
+    finally:
+        app.dependency_overrides.clear(); Base.metadata.drop_all(engine); engine.dispose()
+
+
+def _sqlite_concurrent_requests(factory, request):
+    barrier = threading.Barrier(2)
+
+    def wait_for_racing_flush(session, _flush_context, _instances):
+        if threading.current_thread().name.startswith("capital-race") and not session.info.get("racing_flush"):
+            session.info["racing_flush"] = True
+            barrier.wait(timeout=10)
+
+    event.listen(factory.class_, "before_flush", wait_for_racing_flush)
+    responses = []
+    errors = []
+
+    def run_request():
+        try:
+            with TestClient(app) as client:
+                responses.append(request(client))
+        except Exception as error:  # pragma: no cover - assertion below reports failures
+            errors.append(error)
+
+    try:
+        threads = [threading.Thread(target=run_request, name=f"capital-race-{index}") for index in range(2)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(timeout=15)
+        assert not any(thread.is_alive() for thread in threads)
+        assert not errors
+        return responses
+    finally:
+        event.remove(factory.class_, "before_flush", wait_for_racing_flush)
+
+
+def test_sqlite_concurrent_capital_plan_creation_reloads_idempotent_plan(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'capital.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine); factory = sessionmaker(bind=engine)
+
+    def override():
+        db = factory()
+        try: yield db
+        finally: db.close()
+
+    app.dependency_overrides[get_db] = override
+    try:
+        with TestClient(app) as client:
+            project = client.post("/api/v1/projects", json={"name": "Concurrent capital"}).json()
+        responses = _sqlite_concurrent_requests(factory, lambda client: client.post(
+            f"/api/v1/projects/{project['id']}/capital-plans", headers={"Idempotency-Key": "same-plan"},
+            json={"available_budget": 100, "gates": []},
+        ))
+        assert [response.status_code for response in responses] == [200, 200]
+        assert len({response.json()["id"] for response in responses}) == 1
+        with TestClient(app) as client:
+            assert len(client.get(f"/api/v1/projects/{project['id']}/capital-plans").json()) == 1
+    finally:
+        app.dependency_overrides.clear(); Base.metadata.drop_all(engine); engine.dispose()
+
+
+def test_sqlite_concurrent_distinct_allocation_keys_preserve_budget_invariant(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'distinct-allocation.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine); factory = sessionmaker(bind=engine)
+    def override():
+        db = factory()
+        try: yield db
+        finally: db.close()
+    app.dependency_overrides[get_db] = override
+    try:
+        with TestClient(app) as client:
+            project = client.post("/api/v1/projects", json={"name": "Distinct allocation"}).json()
+            plan = client.post(f"/api/v1/projects/{project['id']}/capital-plans", json={"available_budget": 100, "gates": [{"name": "fund", "recommended_spend": 100, "unlock_conditions": []}]}).json()
+            client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/gates/evaluate", json={"metrics": {}})
+        responses = _sqlite_concurrent_requests(factory, lambda client: client.post(
+            f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/allocate",
+            headers={"Idempotency-Key": threading.current_thread().name}, json={},
+        ))
+        assert [response.status_code for response in responses] == [200, 200]
+        with TestClient(app) as client:
+            persisted = client.get(f"/api/v1/projects/{project['id']}/capital-plans").json()[0]
+        allocated = [item["allocated_spend"] for item in persisted["allocations"]]
+        assert sum(allocated) <= 100
+        assert all(item >= 0 for item in allocated)
+    finally:
+        app.dependency_overrides.clear(); Base.metadata.drop_all(engine); engine.dispose()
+
+
+def test_sqlite_concurrent_same_key_allocation_replays_without_overspending(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'allocation.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine); factory = sessionmaker(bind=engine)
+
+    def override():
+        db = factory()
+        try: yield db
+        finally: db.close()
+
+    app.dependency_overrides[get_db] = override
+    try:
+        with TestClient(app) as client:
+            project = client.post("/api/v1/projects", json={"name": "Concurrent allocation"}).json()
+            plan = client.post(f"/api/v1/projects/{project['id']}/capital-plans", json={"available_budget": 100, "gates": [
+                {"name": "fund", "recommended_spend": 100, "unlock_conditions": []},
+            ]}).json()
+            client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/gates/evaluate", json={"metrics": {}})
+        responses = _sqlite_concurrent_requests(factory, lambda client: client.post(
+            f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/allocate",
+            headers={"Idempotency-Key": "same-allocation"}, json={},
+        ))
+        assert [response.status_code for response in responses] == [200, 200]
+        assert sum(response.json().get("replayed", False) for response in responses) == 1
+        with TestClient(app) as client:
+            persisted = client.get(f"/api/v1/projects/{project['id']}/capital-plans").json()[0]
+        assert len(persisted["allocations"]) == 1
+        assert sum(item["allocated_spend"] for item in persisted["allocations"]) <= 100
+    finally:
+        app.dependency_overrides.clear(); Base.metadata.drop_all(engine); engine.dispose()

@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import EconomicsModel, Hypothesis, Project, ProjectVerdict, Verdict
+from app.db.models import (Competitor, EconomicsModel, Hypothesis, ICPSegment, MarketEntity,
+                           MonetizationAssumption, Project, ProjectVerdict, RiskMapEntry, Verdict)
 from app.db.session import get_db
 from app.engines.project_verdict import ProjectVerdictEngine
 from app.schemas.project_verdicts import ProjectVerdictRead
@@ -80,12 +81,22 @@ def _latest_economics_input(project_id: int, db: Session) -> tuple[dict | None, 
     return {"snapshot_id": snapshot.id, "inputs": snapshot.economics_inputs, "result": snapshot.result, "reliability": snapshot.reliability}, snapshot
 
 
-def _serialize(persisted: ProjectVerdict) -> ProjectVerdictRead:
+def _manual_records(project_id: int, db: Session) -> dict:
+    return {
+        "market": list(db.scalars(select(MarketEntity).where(MarketEntity.project_id == project_id).order_by(MarketEntity.id))),
+        "competitor": list(db.scalars(select(Competitor).where(Competitor.project_id == project_id).order_by(Competitor.id))),
+        "icp": list(db.scalars(select(ICPSegment).where(ICPSegment.project_id == project_id).order_by(ICPSegment.id))),
+        "monetization": list(db.scalars(select(MonetizationAssumption).where(MonetizationAssumption.project_id == project_id).order_by(MonetizationAssumption.id))),
+        "risk_map": list(db.scalars(select(RiskMapEntry).where(RiskMapEntry.project_id == project_id).order_by(RiskMapEntry.id))),
+    }
+
+
+def _serialize(persisted: ProjectVerdict, db: Session) -> ProjectVerdictRead:
     # Older immutable snapshots predate the structured-gap fields.  Enrich
     # only their response representation so they remain readable; new
     # snapshots persist the same deterministic fields in ``result``.
     result = {
-        **build_structured_report_gaps(persisted.project.language),
+        **build_structured_report_gaps(persisted.project.language, _manual_records(persisted.project_id, db)),
         "decision": "VALIDATE", "action": "validate_critical_assumptions",
         "unresolved_critical_hypotheses": [],
         "market_attractiveness": {"status": "unknown", "summary": "No structured market or ICP evidence has been collected.", "market_signals": 0, "icp_segments": 0, "competitors": 0, "unknowns": ["market_attractiveness_not_measured"]},
@@ -94,6 +105,9 @@ def _serialize(persisted: ProjectVerdict) -> ProjectVerdictRead:
         "capital_recommendation": {"status": "unknown", "currency": None, "available_budget": None, "recommended_spend": 0, "gates": [], "recommendation": "Create a gated capital plan after validating economics."},
         **persisted.result,
     }
+    # Current manual records are presentation data, so they intentionally
+    # supersede the immutable snapshot's collected/unknown placeholder.
+    result.update(build_structured_report_gaps(persisted.project.language, _manual_records(persisted.project_id, db)))
     return ProjectVerdictRead(
         id=persisted.id,
         project_id=persisted.project_id,
@@ -117,7 +131,7 @@ def create_project_verdict(project_id: int, db: Annotated[Session, Depends(get_d
     )
     db.commit()
     db.refresh(persisted)
-    return _serialize(persisted)
+    return _serialize(persisted, db)
 
 
 @router.get("", response_model=ProjectVerdictRead)
@@ -131,4 +145,4 @@ def get_latest_project_verdict(project_id: int, db: Annotated[Session, Depends(g
     )
     if persisted is None:
         raise HTTPException(status_code=404, detail="Project verdict not found")
-    return _serialize(persisted)
+    return _serialize(persisted, db)

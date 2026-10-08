@@ -11,8 +11,8 @@ from app.api.capital import create_plan, _plan, evaluate_gates, allocate
 router = APIRouter(prefix="/api/v1/projects/{project_id}/capital", tags=["capital-decision"])
 
 @router.post("/plan")
-def plan_alias(project_id: int, data: CapitalPlanCreate, db: Annotated[Session, Depends(get_db)]):
-    return create_plan(project_id, data, db)
+def plan_alias(project_id: int, data: CapitalPlanCreate, db: Annotated[Session, Depends(get_db)], idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
+    return create_plan(project_id, data, db, idempotency_key)
 
 @router.get("/plan/{plan_id}")
 def get_plan_alias(project_id: int, plan_id: int, db: Annotated[Session, Depends(get_db)]):
@@ -20,7 +20,7 @@ def get_plan_alias(project_id: int, plan_id: int, db: Annotated[Session, Depends
     return _serialize(_plan(project_id, plan_id, db))
 
 @router.post("/plan/{plan_id}/allocate")
-def allocate_alias(project_id: int, plan_id: int, data: AllocationRequest, db: Annotated[Session, Depends(get_db)], idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=120)] = None):
+def allocate_alias(project_id: int, plan_id: int, data: AllocationRequest, db: Annotated[Session, Depends(get_db)], idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
     return allocate(project_id, plan_id, data, db, idempotency_key)
 
 @router.post("/plan/{plan_id}/gates/evaluate")

@@ -1,10 +1,11 @@
 """Durable capital intelligence endpoints."""
 from __future__ import annotations
 from typing import Annotated
+import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.models import CapitalAllocation, CapitalGate, CapitalPlan, Evidence, ExperimentRun, Hypothesis, Project
@@ -30,32 +31,63 @@ def _serialize(plan: CapitalPlan) -> dict:
             "available_budget": plan.available_budget, "recommended_spend": plan.recommended_spend,
             "gates": [{"id": gate.id, "sequence": gate.sequence, "name": gate.name,
                        "recommended_spend": gate.recommended_spend, "unlock_conditions": gate.unlock_condition or [],
-                       "status": gate.status, "evaluation": gate.evaluation} for gate in plan.gates]}
+                       "status": gate.status, "evaluation": gate.evaluation} for gate in plan.gates],
+            "allocations": [{"id": allocation.id, "gate_id": allocation.capital_gate_id,
+                             "requested_spend": allocation.requested_spend, "allocated_spend": allocation.allocated_spend,
+                             "status": allocation.status, "created_at": allocation.created_at.isoformat()}
+                            for allocation in plan.allocations]}
+
+
+@router.get("")
+def list_plans(project_id: int, db: Annotated[Session, Depends(get_db)]):
+    if db.get(Project, project_id) is None:
+        raise HTTPException(404, "Project not found")
+    plans = db.scalars(select(CapitalPlan).where(CapitalPlan.project_id == project_id).order_by(CapitalPlan.id.desc())).all()
+    return [_serialize(plan) for plan in plans]
 
 
 @router.post("")
-def create_plan(project_id: int, data: CapitalPlanCreate, db: Annotated[Session, Depends(get_db)]):
-    if db.get(Project, project_id) is None:
-        raise HTTPException(404, "Project not found")
-    gates = list(data.gates)
-    if not gates:
-        critical = list(db.scalars(select(Hypothesis).where(Hypothesis.project_id == project_id, Hypothesis.is_blocking.is_(True)).order_by(Hypothesis.importance.desc())))
-        from app.schemas.capital import CapitalGateCreate, UnlockCondition
-        gates = [CapitalGateCreate(name=f"Validate: {item.statement[:70]}", recommended_spend=0, unlock_conditions=[UnlockCondition(metric="blocking_hypotheses", operator="<=", value=0)]) for item in critical]
-        if not gates:
-            gates = [CapitalGateCreate(name="Evidence validation", recommended_spend=0, unlock_conditions=[UnlockCondition(metric="verified_evidence_count", operator=">=", value=1)])]
-    plan = CapitalPlan(project_id=project_id, currency=data.currency.upper(), available_budget=data.available_budget,
-                       recommended_spend=sum(gate.recommended_spend for gate in gates))
-    db.add(plan); db.flush()
-    for sequence, gate in enumerate(gates, 1):
-        db.add(CapitalGate(capital_plan_id=plan.id, sequence=sequence, name=gate.name,
-                           recommended_spend=gate.recommended_spend,
-                           unlock_condition=[item.model_dump() for item in gate.unlock_conditions],
-                           status="LOCKED"))
-    record_audit_event(db, project_id=project_id, event_type="capital_plan.created", entity_type="capital_plan",
-                       entity_id=plan.id, payload={"available_budget": plan.available_budget, "recommended_spend": plan.recommended_spend})
-    db.commit(); db.refresh(plan)
-    return _serialize(plan)
+def create_plan(project_id: int, data: CapitalPlanCreate, db: Annotated[Session, Depends(get_db)], idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
+    # SQLite turns competing read-then-write transactions into transient
+    # "database is locked" errors. Retrying the *whole* transaction is
+    # essential: retrying only commit would reuse a stale idempotency read.
+    for attempt in range(5):
+        try:
+            if db.get(Project, project_id) is None:
+                raise HTTPException(404, "Project not found")
+            if idempotency_key:
+                previous = db.scalar(select(CapitalPlan).where(CapitalPlan.project_id == project_id, CapitalPlan.idempotency_key == idempotency_key))
+                if previous is not None:
+                    return _serialize(previous)
+            gates = list(data.gates)
+            if not gates:
+                critical = list(db.scalars(select(Hypothesis).where(Hypothesis.project_id == project_id, Hypothesis.is_blocking.is_(True)).order_by(Hypothesis.importance.desc())))
+                from app.schemas.capital import CapitalGateCreate, UnlockCondition
+                gates = [CapitalGateCreate(name=f"Validate: {item.statement[:70]}", recommended_spend=0, unlock_conditions=[UnlockCondition(metric="blocking_hypotheses", operator="<=", value=0)]) for item in critical]
+                if not gates:
+                    gates = [CapitalGateCreate(name="Evidence validation", recommended_spend=0, unlock_conditions=[UnlockCondition(metric="verified_evidence_count", operator=">=", value=1)])]
+            plan = CapitalPlan(project_id=project_id, currency=data.currency.upper(), available_budget=data.available_budget,
+                               recommended_spend=sum(gate.recommended_spend for gate in gates), idempotency_key=idempotency_key)
+            db.add(plan); db.flush()
+            for sequence, gate in enumerate(gates, 1):
+                db.add(CapitalGate(capital_plan_id=plan.id, sequence=sequence, name=gate.name,
+                                   recommended_spend=gate.recommended_spend,
+                                   unlock_condition=[item.model_dump() for item in gate.unlock_conditions], status="LOCKED"))
+            record_audit_event(db, project_id=project_id, event_type="capital_plan.created", entity_type="capital_plan",
+                               entity_id=plan.id, payload={"available_budget": plan.available_budget, "recommended_spend": plan.recommended_spend})
+            db.commit(); db.refresh(plan)
+            return _serialize(plan)
+        except IntegrityError:
+            db.rollback()
+            previous = db.scalar(select(CapitalPlan).where(CapitalPlan.project_id == project_id, CapitalPlan.idempotency_key == idempotency_key)) if idempotency_key else None
+            if previous is not None:
+                return _serialize(previous)
+            raise
+        except OperationalError:
+            db.rollback()
+            if attempt == 4:
+                raise
+            time.sleep(.01 * (attempt + 1))
 
 
 @router.get("/{plan_id}")
@@ -99,50 +131,38 @@ def evaluate_gates(project_id: int, plan_id: int, data: GateEvaluationRequest, d
 
 
 @router.post("/{plan_id}/allocate")
-def allocate(project_id: int, plan_id: int, data: AllocationRequest, db: Annotated[Session, Depends(get_db)], idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=120)] = None):
-    """Reserve commitment with a conditional update that is safe on SQLite too."""
-    for _ in range(3):
-        plan = db.scalar(select(CapitalPlan).where(CapitalPlan.id == plan_id, CapitalPlan.project_id == project_id))
-        if plan is None:
-            raise HTTPException(404, "Capital plan not found")
-        if idempotency_key:
-            previous = db.scalar(select(CapitalAllocation).where(CapitalAllocation.capital_plan_id == plan_id, CapitalAllocation.idempotency_key == idempotency_key))
-            if previous is not None:
-                return {"plan_id": plan_id, "replayed": True, **(previous.result or {})}
-        requested_budget = plan.available_budget if data.available_budget is None else data.available_budget
-        if requested_budget > plan.available_budget:
-            raise HTTPException(422, "available_budget cannot exceed the capital plan budget")
-        available = min(max(0.0, plan.available_budget - float(plan.reserved_budget)), requested_budget)
-        result = allocate_capital(
-            available,
-            [{"gate_id": gate.id, "recommended_spend": gate.recommended_spend,
-              "gate_unlocked": gate.status == "UNLOCKED"} for gate in plan.gates],
-            candidate_experiments=[candidate.model_dump() for candidate in data.candidate_experiments],
-        )
-        commitment = result["allocated_total"]
-        if commitment and not db.execute(
-            update(CapitalPlan)
-            .where(CapitalPlan.id == plan.id, CapitalPlan.reserved_budget + commitment <= CapitalPlan.available_budget)
-            .values(reserved_budget=CapitalPlan.reserved_budget + commitment)
-        ).rowcount:
-            # A competing request reserved the observed balance. Recalculate
-            # from its committed value instead of relying on FOR UPDATE, which
-            # SQLite does not enforce.
-            db.rollback()
-            continue
-        for index, item in enumerate(result["allocations"]):
-            db.add(CapitalAllocation(capital_plan_id=plan.id, capital_gate_id=item["gate_id"],
-                                     requested_spend=item["requested_spend"], allocated_spend=item["allocated_spend"],
-                                     status=item["status"], result=result, idempotency_key=idempotency_key if index == 0 else None))
-        record_audit_event(db, project_id=project_id, event_type="capital_plan.allocated", entity_type="capital_plan", entity_id=plan.id, payload=result)
+def allocate(project_id: int, plan_id: int, data: AllocationRequest, db: Annotated[Session, Depends(get_db)], idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
+    for attempt in range(5):
         try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
+            plan = db.scalar(select(CapitalPlan).where(CapitalPlan.id == plan_id, CapitalPlan.project_id == project_id).with_for_update())
+            if plan is None:
+                raise HTTPException(404, "Capital plan not found")
             if idempotency_key:
                 previous = db.scalar(select(CapitalAllocation).where(CapitalAllocation.capital_plan_id == plan_id, CapitalAllocation.idempotency_key == idempotency_key))
                 if previous is not None:
                     return {"plan_id": plan_id, "replayed": True, **(previous.result or {})}
+            requested_budget = plan.available_budget if data.available_budget is None else data.available_budget
+            if requested_budget > plan.available_budget:
+                raise HTTPException(422, "available_budget cannot exceed the capital plan budget")
+            committed = db.scalar(select(func.coalesce(func.sum(CapitalAllocation.allocated_spend), 0)).where(CapitalAllocation.capital_plan_id == plan.id)) or 0
+            # A gate can be funded in several passes, but never receives its
+            # already committed spend again.
+            gate_committed = dict(db.execute(select(CapitalAllocation.capital_gate_id, func.coalesce(func.sum(CapitalAllocation.allocated_spend), 0)).where(CapitalAllocation.capital_plan_id == plan.id).group_by(CapitalAllocation.capital_gate_id)).all())
+            available = min(max(0.0, plan.available_budget - float(committed)), requested_budget)
+            result = allocate_capital(available, [{"gate_id": gate.id, "recommended_spend": max(0.0, gate.recommended_spend - float(gate_committed.get(gate.id, 0))), "gate_unlocked": gate.status == "UNLOCKED"} for gate in plan.gates])
+            for index, item in enumerate(result["allocations"]):
+                db.add(CapitalAllocation(capital_plan_id=plan.id, capital_gate_id=item["gate_id"], requested_spend=item["requested_spend"], allocated_spend=item["allocated_spend"], status=item["status"], result=result, idempotency_key=idempotency_key if index == 0 else None))
+            record_audit_event(db, project_id=project_id, event_type="capital_plan.allocated", entity_type="capital_plan", entity_id=plan.id, payload=result)
+            db.commit()
+            return {"plan_id": plan.id, **result}
+        except IntegrityError:
+            db.rollback()
+            previous = db.scalar(select(CapitalAllocation).where(CapitalAllocation.capital_plan_id == plan_id, CapitalAllocation.idempotency_key == idempotency_key)) if idempotency_key else None
+            if previous is not None:
+                return {"plan_id": plan_id, "replayed": True, **(previous.result or {})}
             raise
-        return {"plan_id": plan.id, **result}
-    raise HTTPException(409, "capital budget changed concurrently; retry allocation")
+        except OperationalError:
+            db.rollback()
+            if attempt == 4:
+                raise
+            time.sleep(.01 * (attempt + 1))

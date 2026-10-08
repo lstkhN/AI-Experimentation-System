@@ -1,6 +1,8 @@
 import html
 import json
 from collections import Counter
+from copy import deepcopy
+from urllib.parse import urlsplit
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -103,8 +105,147 @@ def _json_text(value: Any) -> str:
     return _markdown_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
 
 
+def _localized_record_json_text(value: Any, language: str) -> str:
+    """Render manual-record JSON with catalogued RU field names only."""
+    if language == "ru" and isinstance(value, dict):
+        value = {_RU_EXPORT_TEXT.get(str(key), str(key)): item for key, item in value.items()}
+    return _json_text(value)
+
+
 def _append_value(lines: list[str], label: str, value: Any) -> None:
     lines.append(f"- **{label}:** {_markdown_text(value)}")
+
+
+def _safe_evidence_url(value: str | None) -> str | None:
+    """Only publish web URLs; exports must never turn stored schemes into links."""
+    if not value:
+        return None
+    parsed = urlsplit(value)
+    return value if parsed.scheme in {"http", "https"} and parsed.netloc else None
+
+
+def _redact_volatile_research(result: Any) -> Any:
+    """Remove provider snippets from durable-run and verdict export snapshots."""
+    if not isinstance(result, dict):
+        return result
+    redacted = deepcopy(result)
+    for key in ("research_results", "market_findings", "market_snippets", "snippets"):
+        redacted.pop(key, None)
+    return redacted
+
+
+def _sanitize_export_payload(value: Any, *, redact_research: bool = False) -> Any:
+    """Recursively remove RU research material and unsafe URLs from exports."""
+    if isinstance(value, list):
+        return [_sanitize_export_payload(item, redact_research=redact_research) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    sanitized: dict[str, Any] = {}
+    for key, item in value.items():
+        normalized_key = str(key).lower()
+        if redact_research and any(token in normalized_key for token in ("research", "evidence", "snippet")):
+            continue
+        if normalized_key == "url" or normalized_key.endswith("_url") or normalized_key == "href":
+            sanitized[key] = _safe_evidence_url(item) if isinstance(item, str) else None
+        else:
+            sanitized[key] = _sanitize_export_payload(item, redact_research=redact_research)
+    return sanitized
+
+
+_RU_EXPORT_TEXT = {
+    "Decision First": "Решение в первую очередь", "Project Intake": "Параметры проекта",
+    "Hypotheses": "Гипотезы", "Evidence Summary": "Сводка доказательств",
+    "Latest Verdicts": "Последние вердикты", "Economics and Capital Plan": "Экономика и план капитала",
+    "Experiments": "Эксперименты", "Project Verdict": "Вердикт проекта", "Analysis Runs": "Запуски анализа",
+    "Structured Data Gaps": "Пробелы структурированных данных", "ProjectDecision": "Решение по проекту",
+    "Statement": "Гипотеза", "Category": "Категория", "Status": "Статус", "Verdict": "Вердикт",
+    "Rationale": "Обоснование", "Source": "Источник", "Content": "Содержание", "Direction": "Направление",
+    "Tier": "Уровень", "Title": "Название", "Rule": "Правило", "Rules": "Правила", "Language": "Язык",
+    "Description": "Описание", "Action": "Действие", "Decision rule": "Правило решения",
+    "Market attractiveness": "Привлекательность рынка", "Market Attractiveness": "Привлекательность рынка",
+    "Business viability": "Жизнеспособность бизнеса", "Business Viability": "Жизнеспособность бизнеса",
+    "Capital recommendation": "Рекомендация по капиталу", "Capital Recommendation": "Рекомендация по капиталу",
+    "Geography": "География", "Business type": "Тип бизнеса",
+    "Budget": "Бюджет", "Deadline days": "Срок, дней", "Known facts": "Известные факты",
+    "Importance": "Важность", "Total evidence": "Всего доказательств", "URL": "Ссылка",
+    "Economics and Capital Plan": "Экономика и план капитала", "Formula version": "Версия формулы",
+    "Total required": "Всего требуется", "Expected learning": "Ожидаемое обучение", "Unlock condition": "Условие разблокировки",
+    "Hypothesis ID": "ID гипотезы", "Idea Summary": "Сводка идеи", "Success Conditions": "Условия успеха",
+    "Failure Conditions / Kill Gates": "Условия провала / стоп-гейты", "Tested Hypotheses": "Проверенные гипотезы",
+    "Market Findings (Candidates, Not Evidence)": "Рыночные наблюдения (кандидаты, не доказательства)",
+    "Evidence Quality": "Качество доказательств", "Next Recommended Tests": "Следующие рекомендованные тесты",
+    "Decisive Facts": "Решающие факты", "Unknowns": "Неизвестные данные", "Ranked Assumptions": "Ранжированные допущения",
+    "Experiment Alternatives Comparison": "Сравнение альтернатив экспериментов", "Market, ICP, Competition, Monetization and Risks": "Рынок, ICP, конкуренция, монетизация и риски",
+    "Report language": "Язык отчёта", "Analysis Runs": "Запуски анализа", "Created at": "Создан", "Completed at": "Завершён", "Inputs": "Входные данные", "Result": "Результат",
+    "market": "рынок", "icp": "ICP", "competitor": "конкуренты", "monetization": "монетизация", "risk_map": "карта рисков",
+    "target_customer_profile": "профиль целевого клиента", "buyer_role_and_job_to_be_done": "роль покупателя и задача", "segment_size_and_priority": "размер и приоритет сегмента",
+    "market_definition": "определение рынка", "market_size_and_growth": "размер и рост рынка", "geography_specific_demand": "спрос в выбранной географии",
+    "competitor_set": "набор конкурентов", "alternative_solutions": "альтернативные решения", "competitive_differentiation": "конкурентная дифференциация",
+    "pricing_and_packaging": "ценообразование и упаковка", "willingness_to_pay": "готовность платить", "revenue_model_validation": "проверка модели выручки",
+    "risk_register": "реестр рисков", "probability_and_impact": "вероятность и влияние", "mitigations_and_owners": "меры снижения и ответственные",
+    "id": "ID", "project_id": "ID проекта", "provenance": "Происхождение", "source_reference": "Ссылка на источник", "created_at": "Создано",
+    "name": "Название", "entity_type": "Тип сущности", "claim": "Утверждение", "verification_status": "Статус проверки",
+    "competitor_type": "Тип конкурента", "positioning": "Позиционирование", "profile": "Профиль", "job_to_be_done": "Задача пользователя", "priority": "Приоритет",
+    "assumption": "Допущение", "value": "Значение", "currency": "Валюта", "probability": "Вероятность", "impact": "Влияние", "mitigation": "Мера снижения", "owner": "Ответственный",
+    "not_collected_as_structured_data": "не собрано как структурированные данные",
+    "None.": "Нет данных.", "No ProjectDecision snapshot yet.": "Снимок решения по проекту пока отсутствует.",
+    "No capital steps recorded.": "Этапы капитала не записаны.", "Unknown: no manually supplied structured records.": "Неизвестно: нет вручную введённых структурированных записей.",
+}
+_RU_EXPORT_ENUMS = {
+    "queued": "в очереди", "running": "выполняется", "completed": "завершено", "failed": "ошибка",
+    "proposed": "предложен", "approved": "одобрен", "stopped": "остановлен", "locked": "заблокирован",
+    "unlocked": "разблокирован", "passed": "пройден", "supported": "подтверждено", "refuted": "опровергнуто",
+    "inconclusive": "неопределённо", "unproven": "не подтверждено", "candidate": "кандидат",
+    "verified": "проверено", "unknown": "неизвестно", "go": "запуск", "validate": "проверить", "no_go": "не запускать",
+    "target_customer_profile": "профиль целевого клиента", "buyer_role_and_job_to_be_done": "роль покупателя и задача", "segment_size_and_priority": "размер и приоритет сегмента",
+    "market_definition": "определение рынка", "market_size_and_growth": "размер и рост рынка", "geography_specific_demand": "спрос в выбранной географии",
+    "competitor_set": "набор конкурентов", "alternative_solutions": "альтернативные решения", "competitive_differentiation": "конкурентная дифференциация",
+    "pricing_and_packaging": "ценообразование и упаковка", "willingness_to_pay": "готовность платить", "revenue_model_validation": "проверка модели выручки",
+    "risk_register": "реестр рисков", "probability_and_impact": "вероятность и влияние", "mitigations_and_owners": "меры снижения и ответственные",
+    "not_collected_as_structured_data": "не собрано как структурированные данные",
+}
+
+
+_RU_EXPORT_DYNAMIC_HEADINGS = {
+    "Hypothesis ": "Гипотеза ", "Evidence ": "Доказательство ",
+    "Experiment ": "Эксперимент ", "Run ": "Запуск ",
+}
+
+
+def _ru_export_label(label: str) -> str:
+    """Localize only catalogued export chrome, never persisted prose."""
+    if label in _RU_EXPORT_TEXT:
+        return _RU_EXPORT_TEXT[label]
+    for source, target in _RU_EXPORT_DYNAMIC_HEADINGS.items():
+        if label.startswith(source):
+            return f"{target}{label[len(source):]}"
+    return label
+
+
+def _localize_export(lines: list[str], language: str) -> list[str]:
+    """Localize every known Markdown heading and label structurally for RU."""
+    if language != "ru":
+        return lines
+    localized: list[str] = []
+    for line in lines:
+        if line.startswith("#") and " " in line:
+            marker, label = line.split(" ", 1)
+            line = f"{marker} {_ru_export_label(label)}"
+        elif "**" in line and ":**" in line:
+            prefix, label_and_value = line.split("**", 1)
+            label, value = label_and_value.split(":**", 1)
+            line = f"{prefix}**{_ru_export_label(label.strip())}:**{value}"
+        elif line in _RU_EXPORT_TEXT:
+            line = _RU_EXPORT_TEXT[line]
+        elif line.startswith("- "):
+            # Fallback messages are list-prefixed in the Markdown source.
+            # Localize the chrome without touching persisted record prose.
+            fallback = line[2:]
+            if fallback in _RU_EXPORT_TEXT:
+                line = f"- {_RU_EXPORT_TEXT[fallback]}"
+        localized.append(line)
+    return localized
 
 
 def _project_report(project_id: int, db: Session) -> dict[str, Any]:
@@ -163,13 +304,11 @@ def _project_report(project_id: int, db: Session) -> dict[str, Any]:
         "monetization": list(db.scalars(select(MonetizationAssumption).where(MonetizationAssumption.project_id == project_id).order_by(MonetizationAssumption.id))),
         "risk_map": list(db.scalars(select(RiskMapEntry).where(RiskMapEntry.project_id == project_id).order_by(RiskMapEntry.id))),
     }
-    # Only manual records are rendered.  Empty areas retain the existing
-    # explicit disclosure rather than deriving facts from model output.
-    structured_gaps = build_structured_report_gaps(project.language)
-    for section, records in strategy_records.items():
-        if records:
-            structured_gaps[section] = {"status": "collected", "records": jsonable_encoder(records), "data_gaps": []}
-    structured_gaps["data_gaps"] = [gap for section in ("icp", "market", "competitor", "monetization", "risk_map") for gap in structured_gaps[section]["data_gaps"]]
+    # One builder powers report and verdict gap disclosure; only attributable
+    # manual records overlay an otherwise explicit unknown.
+    structured_gaps = build_structured_report_gaps(
+        project.language, jsonable_encoder(strategy_records)
+    )
     project_verdict = None
     decisive_facts: list[Any] = []
     unknowns: list[Any] = []
@@ -177,19 +316,20 @@ def _project_report(project_id: int, db: Session) -> dict[str, Any]:
     if latest_project_verdict is not None:
         # Flatten the immutable engine result into the report while retaining
         # snapshot identity and creation time for auditability.
+        verdict_result = _redact_volatile_research(latest_project_verdict.result or {})
         project_verdict = {
             "id": latest_project_verdict.id,
             "project_id": latest_project_verdict.project_id,
             "economics_snapshot_id": latest_project_verdict.economics_model_id,
             "created_at": latest_project_verdict.created_at,
-            **latest_project_verdict.result,
+            **verdict_result,
             **structured_gaps,
         }
-        decisive_facts = latest_project_verdict.result.get("decisive_facts", [])
-        unknowns = latest_project_verdict.result.get("unknowns", [])
-        ranked_assumptions = latest_project_verdict.result.get("ranked_assumptions", [])
+        decisive_facts = verdict_result.get("decisive_facts", [])
+        unknowns = verdict_result.get("unknowns", [])
+        ranked_assumptions = verdict_result.get("ranked_assumptions", [])
 
-    return jsonable_encoder({
+    report = jsonable_encoder({
         "format_version": "v1.1",
         "project": project,
         "latest_run": latest_run,
@@ -211,6 +351,13 @@ def _project_report(project_id: int, db: Session) -> dict[str, Any]:
         "audit_events": audit_events,
         **structured_gaps,
     })
+    # AnalysisRun objects are encoded above; redact export/report payloads
+    # without changing durable database snapshots.
+    for run in report["analysis_runs"]:
+        run["result"] = _redact_volatile_research(run.get("result"))
+    if report["latest_run"]:
+        report["latest_run"]["result"] = _redact_volatile_research(report["latest_run"].get("result"))
+    return report
 
 
 @router.get("/{project_id}/report", response_model=ProjectReportRead)
@@ -219,10 +366,28 @@ def get_project_report(project_id: int, db: Annotated[Session, Depends(get_db)])
     return _project_report(project_id, db)
 
 
+def _localize_russian_gap_presentation(value: Any) -> Any:
+    """Translate only catalogued gap display values in portable RU exports."""
+    if isinstance(value, list):
+        return [_localize_russian_gap_presentation(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: (
+            _RU_EXPORT_ENUMS.get(item, item)
+            if key in {"field", "reason"} and isinstance(item, str)
+            else _localize_russian_gap_presentation(item)
+        )
+        for key, item in value.items()
+    }
+
+
 @router.get("/{project_id}/export/json", response_model=ProjectReportRead)
 def export_project_json(project_id: int, db: Annotated[Session, Depends(get_db)]) -> dict[str, Any]:
-    """Export the same portable, decision-ready report as JSON."""
-    return _project_report(project_id, db)
+    """Export a portable report with URL sanitization and RU research redaction."""
+    report = _project_report(project_id, db)
+    report = _sanitize_export_payload(report, redact_research=report["project"].get("language") == "ru")
+    return _localize_russian_gap_presentation(report) if report["project"].get("language") == "ru" else report
 
 
 @router.get("/{project_id}/export/html", response_class=HTMLResponse)
@@ -233,13 +398,18 @@ def export_project_html(project_id: int, db: Annotated[Session, Depends(get_db)]
     interpreted as markup, so opening this endpoint cannot execute report data.
     Browsers can save the resulting document as a PDF via their print dialog.
     """
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
     markdown = export_project_markdown(project_id, db).body.decode("utf-8")
     # Markdown escapes are presentation syntax; the print view should not
     # display those escapes around ordinary parentheses.
     markdown = markdown.replace("\\(", "(").replace("\\)", ")")
-    document = """<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Project report</title><style>
-body{font:14px/1.5 system-ui,sans-serif;color:#172033;margin:32px auto;max-width:900px}pre{white-space:pre-wrap;word-break:break-word;font:13px/1.55 ui-monospace,SFMono-Regular,monospace}@page{margin:16mm}@media print{body{margin:0}.no-print{display:none}}
-</style></head><body><button class=\"no-print\" onclick=\"window.print()\">Print / Save as PDF</button><pre>""" + html.escape(markdown) + "</pre></body></html>"
+    print_label = "Печать / Сохранить PDF" if project.language == "ru" else "Print / Save as PDF"
+    title = "Отчёт по проекту" if project.language == "ru" else "Project report"
+    document = f'''<!doctype html><html lang="{project.language}"><head><meta charset="utf-8"><title>{title}</title><style>
+body{{font:14px/1.5 system-ui,sans-serif;color:#172033;margin:32px auto;max-width:900px}}pre{{white-space:pre-wrap;word-break:break-word;font:13px/1.55 ui-monospace,SFMono-Regular,monospace}}@page{{margin:16mm}}@media print{{body{{margin:0}}.no-print{{display:none}}}}
+</style></head><body><button class="no-print" onclick="window.print()">{print_label}</button><pre>''' + html.escape(markdown) + "</pre></body></html>"
     return HTMLResponse(document, headers={"Content-Disposition": "inline; filename=project-report.html", "X-Content-Type-Options": "nosniff"})
 
 
@@ -330,9 +500,9 @@ def export_project_markdown(project_id: int, db: Annotated[Session, Depends(get_
         for evidence, source in evidence_rows:
             lines.extend([
                 f"### Evidence {evidence.id}",
-                f"- **Source:** {_markdown_text(source.name)}",
-                f"- **URL:** {_markdown_text(source.url)}",
-                f"- **Content:** {_markdown_text(evidence.content)}",
+                f"- **Source:** {_markdown_text(source.name if project.language != 'ru' else 'Источник')}",
+                f"- **URL:** {_markdown_text(_safe_evidence_url(source.url))}",
+                f"- **Content:** {_markdown_text(evidence.content if project.language != 'ru' else 'Содержание скрыто в RU')}",
                 f"- **Direction:** {_markdown_text(evidence.direction)}",
                 f"- **Tier:** {_markdown_text(evidence.tier)}",
                 f"- **Category:** {_markdown_text(evidence.category)}",
@@ -385,7 +555,7 @@ def export_project_markdown(project_id: int, db: Annotated[Session, Depends(get_
 
     lines.extend(["", "## Project Verdict"])
     if latest_project_verdict:
-        result = {**build_structured_report_gaps(project.language), **(latest_project_verdict.result or {})}
+        result = {**build_structured_report_gaps(project.language), **_redact_volatile_research(latest_project_verdict.result or {})}
         _append_value(lines, "ProjectDecision", result.get("decision", latest_project_verdict.decision))
         _append_value(lines, "Verdict", latest_project_verdict.verdict)
         _append_value(lines, "Rule", result.get("rule"))
@@ -416,13 +586,16 @@ def export_project_markdown(project_id: int, db: Annotated[Session, Depends(get_
         lines.append(f"### {_markdown_text(section)}")
         if value["status"] == "collected":
             for record in value["records"]:
-                lines.append(f"- {_json_text(record)}")
+                lines.append(f"- {_localized_record_json_text(record, project.language)}")
         else:
             lines.append("- Unknown: no manually supplied structured records.")
     lines.extend(["", "## Structured Data Gaps"])
     _append_value(lines, "Report language", structured_report["language_metadata"]["code"])
     for gap in structured_report["data_gaps"]:
-        lines.append(f"- **{_markdown_text(gap['section'])}.{_markdown_text(gap['field'])}:** {_markdown_text(gap['status'])} ({_markdown_text(gap['reason'])})")
+        section = _RU_EXPORT_ENUMS.get(gap["section"], gap["section"]) if project.language == "ru" else gap["section"]
+        field = _RU_EXPORT_ENUMS.get(gap["field"], gap["field"]) if project.language == "ru" else gap["field"]
+        reason = _RU_EXPORT_ENUMS.get(gap["reason"], gap["reason"]) if project.language == "ru" else gap["reason"]
+        lines.append(f"- **{_markdown_text(section)}.{_markdown_text(field)}:** {_markdown_text(gap['status'])} ({_markdown_text(reason)})")
 
     lines.extend(["", "## Analysis Runs"])
     if runs:
@@ -433,9 +606,9 @@ def export_project_markdown(project_id: int, db: Annotated[Session, Depends(get_
                 f"- **Created at:** {_markdown_text(run.created_at.isoformat())}",
                 f"- **Completed at:** {_markdown_text(run.completed_at.isoformat() if run.completed_at else None)}",
                 f"- **Inputs:** {_json_text(run.inputs)}",
-                f"- **Result:** {_json_text(run.result)}",
+                f"- **Result:** {_json_text(_redact_volatile_research(run.result))}",
             ])
     else:
         lines.append("None.")
 
-    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/markdown")
+    return PlainTextResponse("\n".join(_localize_export(lines, project.language)) + "\n", media_type="text/markdown")

@@ -169,4 +169,5 @@ def get_capital_plan(project_id: int, db: Annotated[Session, Depends(get_db)]) -
         "scenarios": result.get("scenarios", []),
         "unknowns": result.get("unknowns", []),
         "reliability": snapshot.reliability,
+        "economics_inputs": snapshot.economics_inputs,
     }

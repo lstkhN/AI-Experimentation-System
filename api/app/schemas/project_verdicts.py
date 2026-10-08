@@ -23,7 +23,7 @@ class ReportDataGap(BaseModel):
     section: Literal["icp", "market", "competitor", "monetization", "risk_map"]
     field: str
     status: Literal["unknown"]
-    reason: Literal["not_collected_as_structured_data"]
+    reason: Literal["not_collected_as_structured_data", "не собрано как структурированные данные"]
 
 
 class ReportSection(BaseModel):

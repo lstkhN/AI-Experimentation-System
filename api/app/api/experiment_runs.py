@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import ActualVsForecast, ExperimentApproval, ExperimentMeasurement, ExperimentProposal, ExperimentRun, Project
@@ -157,11 +158,37 @@ def delete_measurement(project_id: int, run_id: int, measurement_id: int, db: An
 
 @router.post("/{run_id:int}/evaluate", response_model=ActualVsForecastRead)
 def evaluate_run(project_id: int, run_id: int, db: Annotated[Session, Depends(get_db)]):
-    run = _run(project_id, run_id, db); _require(run, "running")
+    _project(project_id, db)
+    # Row locks serialize evaluators on databases that support them. SQLite
+    # ignores FOR UPDATE, so the unique constraint and recovery below provide
+    # the same idempotent outcome there.
+    statement = select(ExperimentRun).where(
+        ExperimentRun.id == run_id, ExperimentRun.project_id == project_id
+    )
+    if db.get_bind().dialect.name != "sqlite":
+        statement = statement.with_for_update()
+    run = db.scalar(statement)
+    if run is None:
+        raise HTTPException(404, "Experiment run not found")
+    existing = db.scalar(select(ActualVsForecast).where(ActualVsForecast.experiment_run_id == run.id))
+    if existing is not None:
+        return existing
+    _require(run, "running")
     result = evaluate(run.forecast, [(m.metric, m.value) for m in run.measurements])
     report = ActualVsForecast(experiment_run_id=run.id, result=result)
     run.status, run.evaluation, run.completed_at = "completed", result, datetime.now(timezone.utc)
-    db.add(report); db.flush()
+    db.add(report)
+    try:
+        db.flush()
+    except IntegrityError:
+        # A SQLite evaluator can race between the initial read and insert.
+        # Reset this failed transaction and return the winner's durable report
+        # rather than surfacing a uniqueness error to an idempotent caller.
+        db.rollback()
+        existing = db.scalar(select(ActualVsForecast).where(ActualVsForecast.experiment_run_id == run_id))
+        if existing is not None:
+            return existing
+        raise
     # Experiment outcomes immediately refresh the immutable decision report.
     save_project_report_snapshot(db, db.get(Project, project_id))
     _audit(db, project_id, "experiment_run.completed", run, {"actual_vs_forecast_id": report.id, "outcome": result["outcome"]})

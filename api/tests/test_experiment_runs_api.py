@@ -38,6 +38,11 @@ def test_local_experiment_run_lifecycle_is_deterministic_and_isolated():
             assert report.status_code == 200
             assert report.json()["result"] == {"evaluation_version": "v1", "metric": "signups", "forecast_value": 10.0, "actual_value": 12.0, "delta": 2.0, "ratio": 1.2, "outcome": "met", "measurement_count": 1}
             assert client.get(f"{base}/{run_id}/actual-vs-forecast").json()["id"] == report.json()["id"]
+            # A racing evaluator sees the committed result after the row lock's
+            # status re-check rather than attempting a duplicate insert.
+            replay = client.post(f"{base}/{run_id}/evaluate")
+            assert replay.status_code == 200
+            assert replay.json()["id"] == report.json()["id"]
     finally:
         app.dependency_overrides.clear()
         Base.metadata.drop_all(engine)

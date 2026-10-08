@@ -118,7 +118,15 @@ class ProjectVerdictEngine:
             "business_viability": self._business_viability(economics_summary, items, market_context or {}),
             "experiment_comparison": self._experiment_comparison(experiments),
             "capital_recommendation": self._capital_recommendation(capital_plan, economics),
-            **build_structured_report_gaps(language),
+            # Snapshot JSON records only the collected/unknown state. The
+            # endpoint overlays current attributable records for presentation.
+            **build_structured_report_gaps(language, {
+                "market": [{}] if (market_context or {}).get("market_entities") else [],
+                "competitor": [{}] if (market_context or {}).get("competitors") else [],
+                "icp": [{}] if (market_context or {}).get("icp_segments") else [],
+                "monetization": [{}] if (market_context or {}).get("monetization_assumptions") else [],
+                "risk_map": [{}] if (market_context or {}).get("risk_map") else [],
+            }),
         }
 
     def _kill_gates(self, items: list[dict[str, Any]], economics: dict[str, Any] | None) -> list[dict[str, Any]]:

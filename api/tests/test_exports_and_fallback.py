@@ -3,7 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Base
+from app.db.models import AnalysisRun, Base, ProjectVerdict
 from app.db.session import get_db
 from app.main import app
 from app.services.openai_orchestrator import OpenAIOrchestrator
@@ -78,6 +78,156 @@ def test_markdown_export_includes_persisted_evidence_and_capital_plan():
         assert "Formula version" in exported.text and "v1\\.1" in exported.text
         assert "## Structured Data Gaps" in exported.text
         assert "icp.target\\_customer\\_profile" in exported.text
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_russian_exports_hide_untranslated_evidence_and_localize_print_chrome():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "Русский", "language": "ru"}).json()
+        evidence = client.post(f"/api/v1/projects/{project['id']}/evidence", json={
+            "content": "Raw English research content", "source_name": "Raw English source", "status": "verified",
+        })
+        assert evidence.status_code == 201
+
+        markdown = client.get(f"/api/v1/projects/{project['id']}/export/markdown").text
+        assert "## Сводка доказательств" in markdown
+        assert "**Источник:** Источник" in markdown
+        assert "**Содержание:** Содержание скрыто в RU" in markdown
+        assert "Raw English research content" not in markdown
+        assert "Raw English source" not in markdown
+
+        printable = client.get(f"/api/v1/projects/{project['id']}/export/html").text
+        assert '<html lang="ru">' in printable
+        assert "Печать / Сохранить PDF" in printable
+        assert "Отчёт по проекту" in printable
+
+        for presentation in (markdown, printable):
+            assert "профиль целевого клиента" in presentation
+            assert "не собрано как структурированные данные" in presentation
+            assert "Нет вручную введённых структурированных записей" in presentation
+            assert "Unknown: no manually supplied structured records." not in presentation
+            assert "target\\_customer\\_profile" not in presentation
+            assert "not\\_collected\\_as\\_structured\\_data" not in presentation
+
+        json_export = client.get(f"/api/v1/projects/{project['id']}/export/json").json()
+        first_gap = json_export["data_gaps"][0]
+        assert first_gap["field"] == "профиль целевого клиента"
+        assert first_gap["reason"] == "не собрано как структурированные данные"
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_export_redacts_provider_snippets_and_unsafe_evidence_urls():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "Русский", "language": "ru"}).json()
+        with sessionmaker(bind=engine)() as db:
+            db.add(AnalysisRun(project_id=project["id"], status="completed", result={
+                "research_results": [{"snippet": "secret run snippet"}], "safe": "kept",
+            }))
+            db.add(ProjectVerdict(project_id=project["id"], verdict="UNPROVEN", decision="VALIDATE", result={
+                "market_findings": [{"snippet": "secret market snippet"}], "decision": "VALIDATE",
+            }))
+            db.commit()
+        evidence = client.post(f"/api/v1/projects/{project['id']}/evidence", json={
+            "content": "proof", "source_name": "source", "url": "javascript:alert(1)",
+        })
+        assert evidence.status_code == 201
+        exported = client.get(f"/api/v1/projects/{project['id']}/export/json")
+        assert exported.status_code == 200
+        assert "secret run snippet" not in exported.text
+        assert "secret market snippet" not in exported.text
+        markdown = client.get(f"/api/v1/projects/{project['id']}/export/markdown").text
+        assert "javascript:alert" not in markdown
+        assert "## Сводка доказательств" in markdown
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_russian_json_export_recursively_redacts_research_and_sanitizes_urls():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "Русский", "language": "ru"}).json()
+        with sessionmaker(bind=engine)() as db:
+            db.add(AnalysisRun(project_id=project["id"], status="completed", result={
+                "nested": {"research_payload": "secret research", "snippet_text": "secret snippet", "safe": "kept"},
+                "links": {"unsafe_url": "javascript:alert(1)", "good_url": "https://example.test/proof"},
+            }))
+            db.commit()
+        report = client.get(f"/api/v1/projects/{project['id']}/export/json").json()
+        encoded = str(report)
+        assert "secret research" not in encoded
+        assert "secret snippet" not in encoded
+        nested = report["analysis_runs"][0]["result"]["nested"]
+        assert nested == {"safe": "kept"}
+        assert report["analysis_runs"][0]["result"]["links"] == {
+            "unsafe_url": None, "good_url": "https://example.test/proof",
+        }
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_russian_markdown_export_localizes_catalogued_entity_headings_and_labels():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "Русский", "language": "ru"}).json()
+        hypothesis = client.post(f"/api/v1/projects/{project['id']}/hypotheses", json={
+            "statement": "Проверить спрос", "category": "demand", "importance": 1,
+        }).json()
+        client.post(f"/api/v1/projects/{project['id']}/experiments/propose", json={
+            "template_key": "landing_page_v1", "hypothesis_id": hypothesis["id"], "rationale": "test",
+        })
+        with sessionmaker(bind=engine)() as db:
+            db.add(AnalysisRun(project_id=project["id"], status="completed", result={}))
+            db.add(ProjectVerdict(project_id=project["id"], verdict="UNPROVEN", decision="VALIDATE", result={
+                "market_attractiveness": {"status": "unknown"}, "business_viability": {"status": "unknown"},
+            }))
+            db.commit()
+        markdown = client.get(f"/api/v1/projects/{project['id']}/export/markdown").text
+        for label in ("### Гипотеза ", "### Эксперимент ", "### Запуск ", "**Правила:**",
+                      "### Привлекательность рынка", "### Жизнеспособность бизнеса"):
+            assert label in markdown
+        assert "### Hypothesis " not in markdown
+        assert "### Experiment " not in markdown
+        assert "### Run " not in markdown
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_russian_exports_localize_manual_record_json_keys():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "Русский", "language": "ru"}).json()
+        created = client.post(f"/api/v1/projects/{project['id']}/market-entities", json={
+            "name": "Рынок", "entity_type": "segment", "claim": "Ручная запись", "source_reference": "Интервью",
+        })
+        assert created.status_code == 201
+
+        for presentation in (
+            client.get(f"/api/v1/projects/{project['id']}/export/markdown").text,
+            client.get(f"/api/v1/projects/{project['id']}/export/html").text,
+        ):
+            assert "Тип сущности" in presentation
+            assert "Ссылка на источник" in presentation
+            assert "entity\\_type" not in presentation
+            assert "source\\_reference" not in presentation
     finally:
         client.close()
         app.dependency_overrides.clear()

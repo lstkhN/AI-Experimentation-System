@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (AnalysisRun, CapitalPlan, Competitor, EconomicsModel, ExperimentProposal,
                            ExperimentRun, Hypothesis, ICPSegment, MarketEntity, MonetizationAssumption,
-                           Project, ProjectVerdict, ResearchDocument, ResearchStageRun, Verdict)
+                           Project, ProjectVerdict, ResearchDocument, ResearchStageRun, RiskMapEntry, Verdict)
 from app.engines.project_verdict import ProjectVerdictEngine
 
 
@@ -93,6 +93,7 @@ def save_project_report_snapshot(db: Session, project: Project, *, analysis_run:
         "competitors": list(db.scalars(select(Competitor).where(Competitor.project_id == project.id).order_by(Competitor.id))),
         "icp_segments": list(db.scalars(select(ICPSegment).where(ICPSegment.project_id == project.id).order_by(ICPSegment.id))),
         "monetization_assumptions": list(db.scalars(select(MonetizationAssumption).where(MonetizationAssumption.project_id == project.id).order_by(MonetizationAssumption.id))),
+        "risk_map": list(db.scalars(select(RiskMapEntry).where(RiskMapEntry.project_id == project.id).order_by(RiskMapEntry.id))),
     }
     latest_capital_plan = db.scalar(select(CapitalPlan).where(CapitalPlan.project_id == project.id)
                                      .order_by(CapitalPlan.created_at.desc(), CapitalPlan.id.desc()).limit(1))

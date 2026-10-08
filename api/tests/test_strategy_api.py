@@ -30,6 +30,12 @@ def test_manual_strategy_records_are_crud_and_appear_in_report():
         assert report["market"]["status"] == "collected"
         assert report["market"]["records"][0]["provenance"] == "manual"
         assert report["competitor"]["status"] == "collected"
+        # /verdict uses the same overlay as /report, including records added
+        # after any earlier immutable snapshot.
+        verdict = client.post(f"/api/v1/projects/{project_id}/verdict").json()
+        assert verdict["market"]["status"] == "collected"
+        assert verdict["competitor"]["status"] == "collected"
+        assert not any(gap["section"] in {"market", "competitor"} for gap in verdict["data_gaps"])
         assert client.delete(f"/api/v1/projects/{project_id}/market-entities/{entity_id}").status_code == 204
         assert client.post(f"/api/v1/projects/{project_id}/icp-segments", json={"name": "bad", "profile": "x", "source_reference": "x", "provenance": "llm"}).status_code == 422
     finally:

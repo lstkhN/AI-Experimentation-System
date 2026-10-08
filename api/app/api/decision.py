@@ -16,4 +16,4 @@ def get_decision(project_id: int, db: Annotated[Session, Depends(get_db)]):
     snapshot = db.scalar(select(ProjectVerdict).where(ProjectVerdict.project_id == project_id).order_by(ProjectVerdict.created_at.desc(), ProjectVerdict.id.desc()).limit(1))
     if snapshot is None:
         raise HTTPException(404, "Project decision not found")
-    return _serialize(snapshot)
+    return _serialize(snapshot, db)

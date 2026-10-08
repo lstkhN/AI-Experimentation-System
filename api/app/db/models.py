@@ -291,6 +291,7 @@ class EconomicParameter(Base):
 class CapitalPlan(Base):
     """A durable, ordered budget plan.  Gates are evaluated before allocation."""
     __tablename__ = "capital_plans"
+    __table_args__ = (UniqueConstraint("project_id", "idempotency_key", name="uq_capital_plan_project_idempotency"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -298,6 +299,7 @@ class CapitalPlan(Base):
     available_budget: Mapped[float] = mapped_column(nullable=False)
     reserved_budget: Mapped[float] = mapped_column(nullable=False, default=0, server_default="0")
     recommended_spend: Mapped[float] = mapped_column(nullable=False, default=0)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     project: Mapped[Project] = relationship(back_populates="capital_plans")
     gates: Mapped[list[CapitalGate]] = relationship(back_populates="plan", cascade="all, delete-orphan", order_by="CapitalGate.sequence")
