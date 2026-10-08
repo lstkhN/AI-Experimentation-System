@@ -29,6 +29,11 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://localhost:8000/ready && exit 0; sleep 2; done
           docker compose logs
           exit 1
+      - name: Verify PostgreSQL migration roundtrip foreign keys
+        run: |
+          docker compose exec -T api alembic downgrade 20250325_0020
+          docker compose exec -T api alembic upgrade head
+          docker compose exec -T api python -c "from sqlalchemy import create_engine, text; import os; engine = create_engine(os.environ['DATABASE_URL']); rows = engine.connect().execute(text(\"SELECT tc.table_name, kcu.column_name, ccu.table_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND ((tc.table_name = 'evidence' AND kcu.column_name = 'candidate_id') OR (tc.table_name = 'evidence_candidates' AND kcu.column_name = 'promoted_evidence_id')) ORDER BY tc.table_name\")).all(); assert rows == [('evidence', 'candidate_id', 'evidence_candidates')], rows"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import importlib.util
 from pathlib import Path
 import warnings
 
@@ -6,7 +7,9 @@ import pytest
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, select
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.candidates import CandidateCreate, CandidatePromotion, create, promote
@@ -344,24 +347,106 @@ def test_evidence_candidate_schema_has_no_fk_sort_cycle():
     assert not any("unresolvable cycles" in str(warning.message) for warning in captured)
 
 
-def test_migration_removes_candidate_promotion_fk_cycle_on_sqlite(tmp_path, monkeypatch):
+def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_foreign_keys(tmp_path, monkeypatch):
     # env.py prioritizes DATABASE_URL over Config, so explicitly remove it.
     monkeypatch.delenv("DATABASE_URL", raising=False)
     root = Path(__file__).resolve().parents[2]
     database_url = f"sqlite:///{tmp_path / 'migration.db'}"
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", database_url)
-    command.upgrade(config, "head")
+    command.upgrade(config, "20250325_0020")
 
-    from sqlalchemy import inspect
-    inspector = inspect(create_engine(database_url))
-    assert "promoted_evidence_id" not in {column["name"] for column in inspector.get_columns("evidence_candidates")}
-    assert not any(fk["referred_table"] == "evidence" for fk in inspector.get_foreign_keys("evidence_candidates"))
-    assert any(fk["referred_table"] == "evidence_candidates" for fk in inspector.get_foreign_keys("evidence"))
+    engine = create_engine(database_url)
+    with Session(engine) as db:
+        project = Project(name="migration project")
+        db.add(project); db.flush()
+        candidate = EvidenceCandidate(project_id=project.id, claim="promoted claim", source_name="source")
+        source = EvidenceSource(
+            project_id=project.id, identity_key="migration-source", name="source",
+            source_metadata={"provider": "legacy-import", "confidence": 0.8},
+        )
+        db.add_all((candidate, source)); db.flush()
+        # This is a valid legacy reverse-only mapping: 0021 must make it
+        # canonical rather than lose it when promoted_evidence_id is dropped.
+        evidence = Evidence(source_id=source.id, content="promoted claim")
+        db.add(evidence); db.flush()
+        db.execute(
+            text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
+            {"evidence_id": evidence.id, "candidate_id": candidate.id},
+        )
+        candidate_id, evidence_id, source_id = candidate.id, evidence.id, source.id
+        db.commit()
 
-    command.downgrade(config, "20250325_0020")
-    inspector = inspect(create_engine(database_url))
-    assert "promoted_evidence_id" in {column["name"] for column in inspector.get_columns("evidence_candidates")}
-    assert any(fk["referred_table"] == "evidence" for fk in inspector.get_foreign_keys("evidence_candidates"))
+    spec = importlib.util.spec_from_file_location(
+        "candidate_cycle_migration", root / "api/alembic/versions/20250326_0021_remove_candidate_promotion_cycle.py"
+    )
+    migration = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(migration)
 
-    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() == candidate_id
+        assert connection.exec_driver_sql("SELECT id FROM evidence_candidates WHERE id = ?", (candidate_id,)).scalar() == candidate_id
+        assert connection.exec_driver_sql(
+            "SELECT source_metadata FROM evidence_sources WHERE id = ?", (source_id,)
+        ).scalar() == '{"provider": "legacy-import", "confidence": 0.8}'
+        assert any(row[2] == "evidence_candidates" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence)"))
+        assert not any(row[2] == "evidence" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence_candidates)"))
+
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.downgrade()
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        assert connection.exec_driver_sql(
+            "SELECT promoted_evidence_id FROM evidence_candidates WHERE id = ?", (candidate_id,)
+        ).scalar() == evidence_id
+        assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() == candidate_id
+        assert any(row[2] == "evidence_candidates" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence)"))
+        assert any(row[2] == "evidence" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence_candidates)"))
+
+
+def test_migration_rejects_contradictory_candidate_promotion_mappings_with_sqlite_foreign_keys(tmp_path, monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    root = Path(__file__).resolve().parents[2]
+    database_url = f"sqlite:///{tmp_path / 'migration-conflict.db'}"
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    command.upgrade(config, "20250325_0020")
+
+    engine = create_engine(database_url)
+    with Session(engine) as db:
+        project = Project(name="migration project")
+        db.add(project); db.flush()
+        source = EvidenceSource(project=project, identity_key="migration-source", name="source")
+        legacy_candidate = EvidenceCandidate(project_id=project.id, claim="legacy", source_name="source")
+        canonical_candidate = EvidenceCandidate(project_id=project.id, claim="canonical", source_name="source")
+        db.add_all((source, legacy_candidate, canonical_candidate)); db.flush()
+        evidence = Evidence(source_id=source.id, candidate_id=canonical_candidate.id, content="promoted claim")
+        db.add(evidence); db.flush()
+        db.execute(
+            text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
+            {"evidence_id": evidence.id, "candidate_id": legacy_candidate.id},
+        )
+        evidence_id = evidence.id
+        canonical_candidate_id = canonical_candidate.id
+        db.commit()
+
+    spec = importlib.util.spec_from_file_location(
+        "candidate_cycle_migration_conflict", root / "api/alembic/versions/20250326_0021_remove_candidate_promotion_cycle.py"
+    )
+    migration = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(migration)
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        with Operations.context(MigrationContext.configure(connection)):
+            with pytest.raises(RuntimeError, match="contradictory promotion mapping.*legacy candidate"):
+                migration.upgrade()
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        assert connection.exec_driver_sql(
+            "SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)
+        ).scalar() == canonical_candidate_id
