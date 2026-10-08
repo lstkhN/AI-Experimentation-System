@@ -29,11 +29,68 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://localhost:8000/ready && exit 0; sleep 2; done
           docker compose logs
           exit 1
-      - name: Verify PostgreSQL migration roundtrip foreign keys
+      - name: Verify populated PostgreSQL 0021 migration roundtrip
         run: |
           docker compose exec -T api alembic downgrade 20250325_0020
+          docker compose exec -T api python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.begin() as connection:
+              project_id = connection.execute(text("INSERT INTO projects (name, language) VALUES ('0021 migration fixture', 'en') RETURNING id")).scalar_one()
+              source_id = connection.execute(text("""
+                  INSERT INTO evidence_sources (project_id, identity_key, name, source_type, source_metadata)
+                  VALUES (:project_id, '0021-fixture-source', 'fixture source', 'other', CAST(:metadata AS jsonb))
+                  RETURNING id
+              """), {"project_id": project_id, "metadata": '{"provider":"compose-fixture","confidence":0.8}'}).scalar_one()
+              candidate_id = connection.execute(text("""
+                  INSERT INTO evidence_candidates (project_id, claim, source_name)
+                  VALUES (:project_id, 'promoted claim', 'fixture source') RETURNING id
+              """), {"project_id": project_id}).scalar_one()
+              evidence_id = connection.execute(text("""
+                  INSERT INTO evidence (
+                      source_id, content, direction, tier, category, relevance, source_quality, source_cluster, independent
+                  ) VALUES (
+                      :source_id, 'promoted claim', 'supporting', 'E1', 'problem', 1.0, 0.75, 'fixture', true
+                  ) RETURNING id
+              """), {"source_id": source_id}).scalar_one()
+              connection.execute(text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
+                                 {"evidence_id": evidence_id, "candidate_id": candidate_id})
+              connection.execute(text("CREATE TABLE migration_0021_fixture (project_id integer, source_id integer, candidate_id integer, evidence_id integer)"))
+              connection.execute(text("INSERT INTO migration_0021_fixture VALUES (:project_id, :source_id, :candidate_id, :evidence_id)"),
+                                 {"project_id": project_id, "source_id": source_id, "candidate_id": candidate_id, "evidence_id": evidence_id})
+          PY
+          docker compose exec -T api alembic upgrade 20250326_0021
+          docker compose exec -T api python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.connect() as connection:
+              fixture = connection.execute(text("SELECT project_id, source_id, candidate_id, evidence_id FROM migration_0021_fixture")).mappings().one()
+              assert connection.execute(text("SELECT candidate_id FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == fixture["candidate_id"]
+              assert connection.execute(text("SELECT content FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == "promoted claim"
+              assert connection.execute(text("SELECT source_metadata FROM evidence_sources WHERE id = :id"), {"id": fixture["source_id"]}).scalar_one() == {"provider": "compose-fixture", "confidence": 0.8}
+              rows = connection.execute(text("SELECT tc.table_name, kcu.column_name, ccu.table_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND ((tc.table_name = 'evidence' AND kcu.column_name = 'candidate_id') OR (tc.table_name = 'evidence_candidates' AND kcu.column_name = 'promoted_evidence_id')) ORDER BY tc.table_name")).all()
+              assert rows == [("evidence", "candidate_id", "evidence_candidates")], rows
+          PY
+          docker compose exec -T api alembic downgrade 20250325_0020
+          docker compose exec -T api python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["DATABASE_URL"])
+          with engine.connect() as connection:
+              fixture = connection.execute(text("SELECT project_id, source_id, candidate_id, evidence_id FROM migration_0021_fixture")).mappings().one()
+              assert connection.execute(text("SELECT candidate_id FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == fixture["candidate_id"]
+              assert connection.execute(text("SELECT promoted_evidence_id FROM evidence_candidates WHERE id = :id"), {"id": fixture["candidate_id"]}).scalar_one() == fixture["evidence_id"]
+              assert connection.execute(text("SELECT content FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == "promoted claim"
+              assert connection.execute(text("SELECT source_metadata FROM evidence_sources WHERE id = :id"), {"id": fixture["source_id"]}).scalar_one() == {"provider": "compose-fixture", "confidence": 0.8}
+              rows = connection.execute(text("SELECT tc.table_name, kcu.column_name, ccu.table_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND ((tc.table_name = 'evidence' AND kcu.column_name = 'candidate_id') OR (tc.table_name = 'evidence_candidates' AND kcu.column_name = 'promoted_evidence_id')) ORDER BY tc.table_name")).all()
+              assert rows == [("evidence", "candidate_id", "evidence_candidates"), ("evidence_candidates", "promoted_evidence_id", "evidence")], rows
+          PY
           docker compose exec -T api alembic upgrade head
-          docker compose exec -T api python -c "from sqlalchemy import create_engine, text; import os; engine = create_engine(os.environ['DATABASE_URL']); rows = engine.connect().execute(text(\"SELECT tc.table_name, kcu.column_name, ccu.table_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND ((tc.table_name = 'evidence' AND kcu.column_name = 'candidate_id') OR (tc.table_name = 'evidence_candidates' AND kcu.column_name = 'promoted_evidence_id')) ORDER BY tc.table_name\")).all(); assert rows == [('evidence', 'candidate_id', 'evidence_candidates')], rows"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

@@ -392,9 +392,11 @@ def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_forei
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
         assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() == candidate_id
         assert connection.exec_driver_sql("SELECT id FROM evidence_candidates WHERE id = ?", (candidate_id,)).scalar() == candidate_id
+        assert connection.exec_driver_sql("SELECT content FROM evidence WHERE id = ?", (evidence_id,)).scalar() == "promoted claim"
         assert connection.exec_driver_sql(
             "SELECT source_metadata FROM evidence_sources WHERE id = ?", (source_id,)
         ).scalar() == '{"provider": "legacy-import", "confidence": 0.8}'
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert any(row[2] == "evidence_candidates" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence)"))
         assert not any(row[2] == "evidence" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence_candidates)"))
 
@@ -405,6 +407,11 @@ def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_forei
             "SELECT promoted_evidence_id FROM evidence_candidates WHERE id = ?", (candidate_id,)
         ).scalar() == evidence_id
         assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() == candidate_id
+        assert connection.exec_driver_sql("SELECT content FROM evidence WHERE id = ?", (evidence_id,)).scalar() == "promoted claim"
+        assert connection.exec_driver_sql(
+            "SELECT source_metadata FROM evidence_sources WHERE id = ?", (source_id,)
+        ).scalar() == '{"provider": "legacy-import", "confidence": 0.8}'
+        assert connection.exec_driver_sql("PRAGMA foreign_key_check").all() == []
         assert any(row[2] == "evidence_candidates" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence)"))
         assert any(row[2] == "evidence" for row in connection.exec_driver_sql("PRAGMA foreign_key_list(evidence_candidates)"))
 
