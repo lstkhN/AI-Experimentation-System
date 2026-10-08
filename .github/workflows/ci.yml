@@ -50,11 +50,11 @@ jobs:
               """), {"project_id": project_id}).scalar_one()
               evidence_id = connection.execute(text("""
                   INSERT INTO evidence (
-                      source_id, content, direction, tier, category, relevance, source_quality, source_cluster, independent
+                      source_id, candidate_id, content, direction, tier, category, relevance, source_quality, source_cluster, independent
                   ) VALUES (
-                      :source_id, 'promoted claim', 'supporting', 'E1', 'problem', 1.0, 0.75, 'fixture', true
+                      :source_id, :candidate_id, 'promoted claim', 'supporting', 'E1', 'problem', 1.0, 0.75, 'fixture', true
                   ) RETURNING id
-              """), {"source_id": source_id}).scalar_one()
+              """), {"source_id": source_id, "candidate_id": candidate_id}).scalar_one()
               connection.execute(text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
                                  {"evidence_id": evidence_id, "candidate_id": candidate_id})
               connection.execute(text("CREATE TABLE migration_0021_fixture (project_id integer, source_id integer, candidate_id integer, evidence_id integer)"))
@@ -70,6 +70,14 @@ jobs:
           with engine.connect() as connection:
               fixture = connection.execute(text("SELECT project_id, source_id, candidate_id, evidence_id FROM migration_0021_fixture")).mappings().one()
               assert connection.execute(text("SELECT candidate_id FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == fixture["candidate_id"]
+              connection.execute(text("""
+                  DO $$ BEGIN
+                      INSERT INTO evidence (source_id, candidate_id, content, direction, tier, category, relevance, source_quality, source_cluster, independent)
+                      VALUES ((SELECT source_id FROM migration_0021_fixture), -1, 'invalid foreign key', 'supporting', 'E1', 'problem', 1.0, 0.75, 'fixture', true);
+                      RAISE EXCEPTION 'invalid foreign key was accepted';
+                  EXCEPTION WHEN foreign_key_violation THEN NULL;
+                  END $$;
+              """))
               assert connection.execute(text("SELECT content FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == "promoted claim"
               assert connection.execute(text("SELECT source_metadata FROM evidence_sources WHERE id = :id"), {"id": fixture["source_id"]}).scalar_one() == {"provider": "compose-fixture", "confidence": 0.8}
               rows = connection.execute(text("SELECT tc.table_name, kcu.column_name, ccu.table_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND ((tc.table_name = 'evidence' AND kcu.column_name = 'candidate_id') OR (tc.table_name = 'evidence_candidates' AND kcu.column_name = 'promoted_evidence_id')) ORDER BY tc.table_name")).all()
@@ -85,6 +93,14 @@ jobs:
               fixture = connection.execute(text("SELECT project_id, source_id, candidate_id, evidence_id FROM migration_0021_fixture")).mappings().one()
               assert connection.execute(text("SELECT candidate_id FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == fixture["candidate_id"]
               assert connection.execute(text("SELECT promoted_evidence_id FROM evidence_candidates WHERE id = :id"), {"id": fixture["candidate_id"]}).scalar_one() == fixture["evidence_id"]
+              connection.execute(text("""
+                  DO $$ BEGIN
+                      INSERT INTO evidence_candidates (project_id, claim, source_name, promoted_evidence_id)
+                      VALUES ((SELECT project_id FROM migration_0021_fixture), 'invalid foreign key', 'fixture source', -1);
+                      RAISE EXCEPTION 'invalid foreign key was accepted';
+                  EXCEPTION WHEN foreign_key_violation THEN NULL;
+                  END $$;
+              """))
               assert connection.execute(text("SELECT content FROM evidence WHERE id = :id"), {"id": fixture["evidence_id"]}).scalar_one() == "promoted claim"
               assert connection.execute(text("SELECT source_metadata FROM evidence_sources WHERE id = :id"), {"id": fixture["source_id"]}).scalar_one() == {"provider": "compose-fixture", "confidence": 0.8}
               rows = connection.execute(text("SELECT tc.table_name, kcu.column_name, ccu.table_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND ((tc.table_name = 'evidence' AND kcu.column_name = 'candidate_id') OR (tc.table_name = 'evidence_candidates' AND kcu.column_name = 'promoted_evidence_id')) ORDER BY tc.table_name")).all()

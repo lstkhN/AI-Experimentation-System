@@ -10,6 +10,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.candidates import CandidateCreate, CandidatePromotion, create, promote
@@ -366,15 +367,14 @@ def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_forei
             source_metadata={"provider": "legacy-import", "confidence": 0.8},
         )
         db.add_all((candidate, source)); db.flush()
-        # This is a valid legacy reverse-only mapping: 0021 must make it
-        # canonical rather than lose it when promoted_evidence_id is dropped.
-        evidence = Evidence(source_id=source.id, content="promoted claim")
+        # This matching legacy pair must survive the 0021 roundtrip intact.
+        evidence = Evidence(source_id=source.id, candidate_id=candidate.id, content="promoted claim")
         db.add(evidence); db.flush()
         db.execute(
             text("UPDATE evidence_candidates SET promoted_evidence_id = :evidence_id WHERE id = :candidate_id"),
             {"evidence_id": evidence.id, "candidate_id": candidate.id},
         )
-        candidate_id, evidence_id, source_id = candidate.id, evidence.id, source.id
+        project_id, candidate_id, evidence_id, source_id = project.id, candidate.id, evidence.id, source.id
         db.commit()
 
     spec = importlib.util.spec_from_file_location(
@@ -389,9 +389,18 @@ def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_forei
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
         with Operations.context(MigrationContext.configure(connection)):
             migration.upgrade()
+        connection.commit()
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
         assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() == candidate_id
         assert connection.exec_driver_sql("SELECT id FROM evidence_candidates WHERE id = ?", (candidate_id,)).scalar() == candidate_id
+        with pytest.raises(IntegrityError):
+            connection.exec_driver_sql(
+                """INSERT INTO evidence (
+                    source_id, candidate_id, content, direction, tier, category,
+                    relevance, source_quality, source_cluster, independent
+                ) VALUES (?, ?, ?, 'supporting', 'E1', 'problem', 1.0, 0.75, 'fixture', 1)""",
+                (source_id, candidate_id + 1_000_000, "invalid candidate"),
+            )
         assert connection.exec_driver_sql("SELECT content FROM evidence WHERE id = ?", (evidence_id,)).scalar() == "promoted claim"
         assert connection.exec_driver_sql(
             "SELECT source_metadata FROM evidence_sources WHERE id = ?", (source_id,)
@@ -402,11 +411,19 @@ def test_migration_removes_populated_candidate_promotion_cycle_with_sqlite_forei
 
         with Operations.context(MigrationContext.configure(connection)):
             migration.downgrade()
+        connection.commit()
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
         assert connection.exec_driver_sql(
             "SELECT promoted_evidence_id FROM evidence_candidates WHERE id = ?", (candidate_id,)
         ).scalar() == evidence_id
         assert connection.exec_driver_sql("SELECT candidate_id FROM evidence WHERE id = ?", (evidence_id,)).scalar() == candidate_id
+        with pytest.raises(IntegrityError):
+            connection.exec_driver_sql(
+                """INSERT INTO evidence_candidates (
+                    project_id, claim, source_name, promoted_evidence_id
+                ) VALUES (?, ?, ?, ?)""",
+                (project_id, "invalid promoted evidence", "source", evidence_id + 1_000_000),
+            )
         assert connection.exec_driver_sql("SELECT content FROM evidence WHERE id = ?", (evidence_id,)).scalar() == "promoted claim"
         assert connection.exec_driver_sql(
             "SELECT source_metadata FROM evidence_sources WHERE id = ?", (source_id,)
