@@ -193,8 +193,15 @@ def allocate(project_id: int, plan_id: int, data: AllocationRequest, db: Annotat
                 if previous is not None:
                     return {"plan_id": plan_id, "replayed": True, **(previous.result or {})}
             # Re-evaluate from durable facts inside the allocation transaction so
-            # stale gate evaluations cannot fund a newly blocked project.
-            _evaluate_plan(plan, project_id, {}, db)
+            # stale gate evaluations cannot fund a newly blocked project. Preserve
+            # previously supplied non-system metrics (for example interview
+            # counts), while refreshing all authoritative persisted metrics.
+            persisted_metric_names = set(_persisted_metrics(project_id, db))
+            manual_metrics = {}
+            for gate in plan.gates:
+                saved_metrics = (gate.evaluation or {}).get("metrics", {})
+                manual_metrics.update({key: value for key, value in saved_metrics.items() if key not in persisted_metric_names})
+            _evaluate_plan(plan, project_id, manual_metrics, db)
             requested_budget = plan.available_budget if data.available_budget is None else data.available_budget
             if requested_budget > plan.available_budget:
                 raise HTTPException(422, "available_budget cannot exceed the capital plan budget")
