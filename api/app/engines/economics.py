@@ -334,3 +334,46 @@ def sample_size_proportion(expected: float = 0.5, half_width: float = 0.1, z: fl
     if not 0 < expected < 1 or half_width <= 0:
         raise ValueError("expected must be in (0,1), half_width must be positive")
     return math.ceil((z * z * expected * (1 - expected)) / (half_width * half_width))
+
+
+def calculate_value_of_information(*, prior_alpha: float, prior_beta: float, threshold: float,
+                                   upside: float, downside: float, experiments: list[dict],
+                                   iterations: int = 20_000, seed: int = 0) -> dict:
+    """Estimate EVPI/EVSI with an explicit Beta-Binomial decision model."""
+    if prior_alpha <= 0 or prior_beta <= 0 or not 0 < threshold < 1:
+        raise ValueError("prior alpha/beta must be positive and threshold must be between 0 and 1")
+    if iterations < 1 or iterations > 100_000:
+        raise ValueError("iterations must be between 1 and 100000")
+    if upside < 0 or downside > 0:
+        raise ValueError("upside must be non-negative and downside must be non-positive")
+    rng = np.random.default_rng(seed)
+    theta = rng.beta(prior_alpha, prior_beta, iterations)
+    truth_is_good = theta >= threshold
+    current_go = (prior_alpha / (prior_alpha + prior_beta)) >= threshold
+    current_utility = np.where(truth_is_good, upside, downside) if current_go else np.zeros(iterations)
+    current_value = float(np.mean(current_utility))
+    evpi = float(np.mean(np.where(truth_is_good, upside, 0.0)) - current_value)
+    results: list[dict] = []
+    for experiment in experiments:
+        name = str(experiment.get("name", "experiment"))
+        sample_size = int(experiment.get("sample_size", 0))
+        cost = float(experiment.get("cost", 0))
+        if sample_size < 1 or cost < 0:
+            raise ValueError("experiment sample_size must be positive and cost non-negative")
+        successes = rng.binomial(sample_size, theta)
+        posterior_mean = (prior_alpha + successes) / (prior_alpha + prior_beta + sample_size)
+        go_after = posterior_mean >= threshold
+        after_utility = np.where(go_after, np.where(truth_is_good, upside, downside), 0.0)
+        gross = float(np.mean(after_utility) - current_value)
+        net = gross - cost
+        results.append({"name": name, "sample_size": sample_size, "cost": cost,
+                        "evsi_gross": gross, "evsi_net": net,
+                        "decision_change_probability": float(np.mean(go_after != current_go)),
+                        "recommended": net > 0})
+    best = max(results, key=lambda item: item["evsi_net"], default=None)
+    return {"method": "beta_binomial_nested_monte_carlo", "status": "AVAILABLE",
+            "current_decision": "GO" if current_go else "STOP", "current_value": current_value,
+            "evpi": evpi, "experiments": results,
+            "recommended_experiment": best["name"] if best and best["recommended"] else None,
+            "provenance": {"seed": seed, "iterations": iterations, "rng": "numpy.PCG64"},
+            "assumptions": ["Unknown success rate follows a Beta prior.", "Experiment outcomes follow a Binomial likelihood.", "GO is selected when posterior mean reaches the threshold.", "Upside and downside are decision utilities, not revenue forecasts."]}

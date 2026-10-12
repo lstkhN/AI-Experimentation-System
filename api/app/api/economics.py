@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import EconomicParameter, EconomicsModel, Evidence, EvidenceSource, Project
 from app.db.session import get_db
-from app.engines.economics import FORMULA_VERSION, calculate_economics, simulate_economics
-from app.schemas.economics import CapitalPlanRequest, EconomicsCalculateRequest, EconomicsSimulationRequest
+from app.engines.economics import FORMULA_VERSION, calculate_economics, calculate_value_of_information, simulate_economics
+from app.schemas.economics import CapitalPlanRequest, EconomicsCalculateRequest, EconomicsSimulationRequest, ValueOfInformationRequest
 from app.services.audit import record_audit_event
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/economics", tags=["economics"])
@@ -154,6 +154,23 @@ def simulate(project_id: int, request: EconomicsSimulationRequest, db: Annotated
     )
     db.commit()
     return {"snapshot_id": snapshot.id, **result}
+
+
+@router.post("/value-of-information")
+def value_of_information(project_id: int, request: ValueOfInformationRequest, db: Annotated[Session, Depends(get_db)]) -> dict:
+    """Calculate decision value for candidate experiments using an explicit Bayesian model."""
+    if db.get(Project, project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    payload = request.model_dump()
+    payload["threshold"] = payload.pop("decision_threshold")
+    result = calculate_value_of_information(**payload)
+    record_audit_event(
+        db, project_id=project_id, event_type="economics.value_of_information.calculated",
+        entity_type="project", entity_id=project_id,
+        payload={"method": result["method"], "iterations": request.iterations, "seed": request.seed},
+    )
+    db.commit()
+    return result
 
 
 @router.post("/capital-plan")

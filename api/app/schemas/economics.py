@@ -160,6 +160,24 @@ class EconomicsSimulationRequest(BaseModel):
         return self
 
 
+class ValueOfInformationExperiment(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    sample_size: int = Field(gt=0, le=100_000)
+    cost: float = Field(ge=0)
+
+
+class ValueOfInformationRequest(BaseModel):
+    """Explicit Bayesian model for valuing candidate experiments."""
+    prior_alpha: float = Field(gt=0)
+    prior_beta: float = Field(gt=0)
+    decision_threshold: float = Field(gt=0, lt=1)
+    upside: float = Field(ge=0)
+    downside: float = Field(le=0)
+    experiments: list[ValueOfInformationExperiment] = Field(min_length=1, max_length=50)
+    iterations: int = Field(default=20_000, ge=1, le=100_000)
+    seed: int = 0
+
+
 class CapitalPlanRequest(BaseModel):
     """Calculate and save a capital plan, optionally with economics assumptions."""
 

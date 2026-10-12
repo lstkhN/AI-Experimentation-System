@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from app.engines.economics import UnitEconomics, beta_update, calculate_economics, sample_size_proportion, scenario_percentiles, simulate_economics, unit_economics
+from app.engines.economics import UnitEconomics, beta_update, calculate_economics, calculate_value_of_information, sample_size_proportion, scenario_percentiles, simulate_economics, unit_economics
 from app.schemas.economics import ParameterProvenance
 
 def test_parameter_provenance_requires_consistent_flags_and_trusted_references():
@@ -72,6 +72,22 @@ def test_unknown_churn_does_not_emit_ltv():
 def test_beta_binomial_update():
     result = beta_update(1, 1, 2, 8)
     assert result == {"alpha": 3, "beta": 9, "posterior_mean": pytest.approx(.25)}
+
+def test_bayesian_value_of_information_is_reproducible_and_cost_sensitive():
+    kwargs = {
+        "prior_alpha": 2, "prior_beta": 8, "threshold": .3,
+        "upside": 1000, "downside": -300,
+        "experiments": [{"name": "landing", "sample_size": 100, "cost": 50}],
+        "iterations": 2000, "seed": 7,
+    }
+    first = calculate_value_of_information(**kwargs)
+    second = calculate_value_of_information(**kwargs)
+    assert first == second
+    assert first["method"] == "beta_binomial_nested_monte_carlo"
+    assert first["status"] == "AVAILABLE"
+    assert first["evpi"] >= first["experiments"][0]["evsi_gross"] - 1e-9
+    assert first["experiments"][0]["evsi_net"] == pytest.approx(first["experiments"][0]["evsi_gross"] - 50)
+
 
 def test_percentile_ranges():
     result = scenario_percentiles(np.arange(1, 101))
