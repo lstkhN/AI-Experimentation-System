@@ -2,7 +2,6 @@ import { expect, test, type APIRequestContext } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
-const required = process.env.CI_API_REQUIRED === '1';
 const base = (process.env.API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
 async function api(request: APIRequestContext, method: 'get' | 'post', endpoint: string, data?: unknown) {
@@ -17,8 +16,7 @@ async function requireReady(request: APIRequestContext) {
     if (!ready.ok()) throw new Error(`readiness returned ${ready.status()}: ${await ready.text()}`);
     expect((await ready.json()).status).toBe('ok');
   } catch (error) {
-    if (required) throw error;
-    test.skip(true, 'API is unavailable; run Docker Compose first');
+    throw new Error(`Compose API is required for this lifecycle test: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -100,10 +98,8 @@ test('Compose API lifecycle persists every decision artifact across restart', as
   expect(exported.project.id).toBe(project.id);
   expect(exported.evidence).toHaveLength(1);
 
-  if (required) {
-    execFileSync('docker', ['compose', 'restart', 'api'], { cwd: path.resolve(__dirname, '../..'), stdio: 'pipe' });
-    await waitForReady(request);
-  }
+  execFileSync('docker', ['compose', 'restart', 'api'], { cwd: path.resolve(__dirname, '../..'), stdio: 'pipe' });
+  await waitForReady(request);
   const persisted = await api(request, 'get', `${prefix}/report`);
   expect(persisted.hypotheses.map((item: { id: number }) => item.id)).toContain(hypothesis.id);
   expect(persisted.evidence.map((item: { id: number }) => item.id)).toContain(evidence.id);
