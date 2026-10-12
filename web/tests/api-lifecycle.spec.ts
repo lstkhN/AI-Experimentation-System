@@ -56,8 +56,11 @@ test('Compose API lifecycle persists every decision artifact across restart', as
   const verdict = await api(request, 'post', `${prefix}/hypotheses/${hypothesis.id}/verdict`);
   expect(verdict.hypothesis_id).toBe(hypothesis.id);
 
+  const provenance = Object.fromEntries(['price', 'variable_cost', 'monthly_churn', 'cac', 'fixed_monthly_cost', 'target_ltv_cac_ratio'].map((parameter) => [parameter, {
+    source_type: 'verified_evidence', source_id: String(evidence.id), confidence: 'MEDIUM', observed: true,
+  }]));
   const economics = await api(request, 'post', `${prefix}/economics/calculate`, {
-    currency: 'USD', scenarios: [{ name: 'base', price: 100, variable_cost: 20, monthly_churn: 0.05, cac: 50 }],
+    currency: 'USD', scenarios: [{ name: 'base', price: 100, variable_cost: 20, monthly_churn: 0.05, cac: 50, parameter_provenance: provenance }],
     sensitivity: { monthly_churn_rates: [0.03, 0.05] },
   });
   expect(economics.snapshot_id).toBeTruthy();
