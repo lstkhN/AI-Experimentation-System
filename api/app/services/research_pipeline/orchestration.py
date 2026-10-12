@@ -5,14 +5,15 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import AnalysisRun, ResearchClaim, ResearchDocument, ResearchStageRun, ResearchVerification
+from app.db.models import (AnalysisRun, ResearchClaim, ResearchClaimContradiction, ResearchDocument,
+                           ResearchStageRun, ResearchVerification, ResearchVerificationAttempt)
 from app.services.evidence_normalization import canonical_source_cluster
 from app.services.research import json_normalize
 from app.workers.run_worker import heartbeat
 from .claims import extract_claims
 from .extract import extract
 from .fetch import fetch
-from .verify import verify_claim
+from .verify import contradicts, verify_claim
 
 STAGES = ("search", "fetch", "extract", "claims", "verify", "cluster")
 
@@ -36,12 +37,15 @@ def _stage(db: Session, run_id: int, name: str, lease_token: str | None = None) 
     return item
 
 
-def _complete(db: Session, stage: ResearchStageRun, lease_token: str | None = None, **checkpoint: int) -> None:
+def _complete(db: Session, stage: ResearchStageRun, lease_token: str | None = None,
+              output: dict | None = None, **checkpoint: int) -> None:
     """Commit a stage only while the worker still owns an unexpired lease."""
     stage.status = "completed"
     stage.completed_at = datetime.now(timezone.utc)
     stage.error = None
     stage.checkpoint = checkpoint
+    if output is not None:
+        stage.output = json_normalize(output)
     # Keep the conditional lease update and artifact/stage writes in one
     # transaction so a stale worker cannot publish a checkpoint.
     if lease_token is not None and not heartbeat(db, stage.analysis_run_id, lease_token, commit=False):
@@ -167,21 +171,43 @@ def run_research_pipeline(db: Session, run: AnalysisRun, provider, query: str, *
                     continue
                 metadata = claim.document.source_metadata or {}
                 quality = float(metadata.get("source_quality", 0.0) or 0.0)
-                result = verify_claim({"claim": claim.claim}, methodology_available=bool(metadata.get("methodology_available")), source_quality=quality)
+                cluster = canonical_source_cluster(claim.document.url)
+                peer_clusters = {canonical_source_cluster(peer.document.url) for peer in claims
+                                 if peer.claim == claim.claim and peer.id != claim.id}
+                result = verify_claim({"claim": claim.claim}, methodology_available=bool(metadata.get("methodology_available")),
+                    source_quality=quality, fetched_at=claim.document.fetched_at, source_cluster=cluster,
+                    independent_clusters=len(peer_clusters))
                 claim.status = result["status"]
-                db.add(ResearchVerification(claim_id=claim.id, status=result["status"], reason=result["verification_reason"], methodology_available=bool(metadata.get("methodology_available")), source_quality=quality))
+                verification = ResearchVerification(claim_id=claim.id, status=result["status"], reason=result["verification_reason"],
+                    methodology_available=bool(metadata.get("methodology_available")), source_quality=quality,
+                    freshness_score=result["freshness_score"], independence_score=result["independence_score"], provenance=result["provenance"])
+                db.add(verification); db.flush()
+                db.add(ResearchVerificationAttempt(claim_id=claim.id, verification_id=verification.id, source_cluster=cluster,
+                    status=result["status"], freshness_score=result["freshness_score"], independence_score=result["independence_score"], provenance=result["provenance"]))
             _heartbeat_or_raise(db, run_id, lease_token)
-            _complete(db, current, lease_token, verifications=len(claims))
+            _complete(db, current, lease_token, verifications=len(claims), output={"claim_ids": [claim.id for claim in claims]})
 
         current = _stage(db, run_id, "cluster", lease_token)
         if current.status != "completed":
             _heartbeat_or_raise(db, run_id, lease_token)
             current.status, current.started_at = "running", datetime.now(timezone.utc)
+            contradiction_pairs: list[list[int]] = []
             for claim in claims:
                 _heartbeat_or_raise(db, run_id, lease_token)
                 claim.source_cluster = canonical_source_cluster(claim.document.url)
+            for index, claim in enumerate(claims):
+                for other in claims[index + 1:]:
+                    if contradicts(claim.claim, other.claim):
+                        first_id, second_id = sorted((claim.id, other.id))
+                        exists = db.scalar(select(ResearchClaimContradiction.id).where(
+                            ResearchClaimContradiction.claim_id == first_id,
+                            ResearchClaimContradiction.contradicts_claim_id == second_id))
+                        if not exists:
+                            db.add(ResearchClaimContradiction(claim_id=first_id, contradicts_claim_id=second_id,
+                                                              reason="same normalized claim with opposite polarity"))
+                        contradiction_pairs.append([first_id, second_id])
             _heartbeat_or_raise(db, run_id, lease_token)
-            _complete(db, current, lease_token, claims=len(claims))
+            _complete(db, current, lease_token, claims=len(claims), output={"contradictions": contradiction_pairs})
         return _documents(db, run_id)
     except Exception as exc:
         stage_name = current.stage if current is not None else None

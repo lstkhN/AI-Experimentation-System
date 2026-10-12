@@ -405,6 +405,8 @@ class ResearchStageRun(Base):
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", server_default="pending")
     checkpoint: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # JSON-safe stage result retained for audit/replay, separate from progress counts.
+    output: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -448,6 +450,12 @@ class ResearchClaim(Base):
 
     document: Mapped[ResearchDocument] = relationship(back_populates="claims")
     verifications: Mapped[list[ResearchVerification]] = relationship(back_populates="claim", cascade="all, delete-orphan")
+    contradiction_links: Mapped[list[ResearchClaimContradiction]] = relationship(
+        foreign_keys="ResearchClaimContradiction.claim_id", cascade="all, delete-orphan"
+    )
+    contradicted_by_links: Mapped[list[ResearchClaimContradiction]] = relationship(
+        foreign_keys="ResearchClaimContradiction.contradicts_claim_id", cascade="all, delete-orphan"
+    )
 
 
 class ResearchVerification(Base):
@@ -460,9 +468,45 @@ class ResearchVerification(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     methodology_available: Mapped[bool] = mapped_column(nullable=False, default=False, server_default="0")
     source_quality: Mapped[float] = mapped_column(nullable=False, default=0.0, server_default="0")
+    freshness_score: Mapped[float] = mapped_column(nullable=False, default=1.0, server_default="1")
+    independence_score: Mapped[float] = mapped_column(nullable=False, default=0.0, server_default="0")
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     claim: Mapped[ResearchClaim] = relationship(back_populates="verifications")
+    attempts: Mapped[list[ResearchVerificationAttempt]] = relationship(back_populates="verification", cascade="all, delete-orphan")
+
+
+class ResearchVerificationAttempt(Base):
+    """One independent source check retained even when the summary is unchanged."""
+    __tablename__ = "research_verification_attempts"
+    __table_args__ = (UniqueConstraint("claim_id", "source_cluster", name="uq_research_verification_attempt_claim_cluster"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    claim_id: Mapped[int] = mapped_column(ForeignKey("research_claims.id", ondelete="CASCADE"), nullable=False, index=True)
+    verification_id: Mapped[int] = mapped_column(ForeignKey("research_verifications.id", ondelete="CASCADE"), nullable=False)
+    source_cluster: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    freshness_score: Mapped[float] = mapped_column(nullable=False)
+    independence_score: Mapped[float] = mapped_column(nullable=False)
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    verification: Mapped[ResearchVerification] = relationship(back_populates="attempts")
+
+
+class ResearchClaimContradiction(Base):
+    __tablename__ = "research_claim_contradictions"
+    __table_args__ = (
+        CheckConstraint("claim_id < contradicts_claim_id", name="ck_research_claim_contradictions_order"),
+        UniqueConstraint("claim_id", "contradicts_claim_id", name="uq_research_claim_contradiction_pair"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    claim_id: Mapped[int] = mapped_column(ForeignKey("research_claims.id", ondelete="CASCADE"), nullable=False, index=True)
+    contradicts_claim_id: Mapped[int] = mapped_column(ForeignKey("research_claims.id", ondelete="CASCADE"), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class Hypothesis(Base):

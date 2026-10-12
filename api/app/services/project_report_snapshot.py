@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (AnalysisRun, CapitalPlan, Competitor, EconomicsModel, ExperimentProposal,
                            ExperimentRun, Hypothesis, ICPSegment, MarketEntity, MonetizationAssumption,
-                           Project, ProjectVerdict, ResearchDocument, ResearchStageRun, RiskMapEntry, Verdict)
+                           Project, ProjectVerdict, ResearchClaim, ResearchClaimContradiction, ResearchDocument,
+                           ResearchStageRun, RiskMapEntry, Verdict)
 from app.engines.project_verdict import ProjectVerdictEngine
 
 
@@ -57,12 +58,29 @@ def _persisted_research(db: Session, run: AnalysisRun | None) -> list[dict[str, 
         ResearchDocument.analysis_run_id == run.id
     ).order_by(ResearchDocument.id)))
     if documents:
+        claims = list(db.scalars(select(ResearchClaim).join(ResearchDocument).where(
+            ResearchDocument.analysis_run_id == run.id
+        )))
+        contradictions = {link.claim_id for link in db.scalars(select(ResearchClaimContradiction).join(
+            ResearchClaim, ResearchClaimContradiction.claim_id == ResearchClaim.id).join(
+            ResearchDocument, ResearchClaim.document_id == ResearchDocument.id).where(
+            ResearchDocument.analysis_run_id == run.id
+        ))} | {link.contradicts_claim_id for link in db.scalars(select(ResearchClaimContradiction).join(
+            ResearchClaim, ResearchClaimContradiction.claim_id == ResearchClaim.id).join(
+            ResearchDocument, ResearchClaim.document_id == ResearchDocument.id).where(
+            ResearchDocument.analysis_run_id == run.id
+        ))}
+        by_document: dict[int, list[dict[str, Any]]] = {}
+        for claim in claims:
+            verification = claim.verifications[0] if claim.verifications else None
+            by_document.setdefault(claim.document_id, []).append({"claim": claim.claim, "status": claim.status,
+                "source_cluster": claim.source_cluster, "contradicted": claim.id in contradictions,
+                "verification": None if verification is None else {"freshness_score": verification.freshness_score,
+                    "independence_score": verification.independence_score, "provenance": verification.provenance}})
         return [{
-            "title": document.title or document.url,
-            "url": document.url,
-            "content": document.content or "",
+            "title": document.title or document.url, "url": document.url, "content": document.content or "",
             "fetched_at": document.fetched_at.isoformat() if document.fetched_at else None,
-            "source_metadata": document.source_metadata,
+            "source_metadata": document.source_metadata, "claims": by_document.get(document.id, []),
             "stage": stages[document.stage_run_id].stage if document.stage_run_id in stages else None,
             "stage_status": stages[document.stage_run_id].status if document.stage_run_id in stages else None,
         } for document in documents]
