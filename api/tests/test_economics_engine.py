@@ -89,6 +89,25 @@ def test_bayesian_value_of_information_is_reproducible_and_cost_sensitive():
     assert first["experiments"][0]["evsi_net"] == pytest.approx(first["experiments"][0]["evsi_gross"] - 50)
 
 
+def test_bayesian_value_of_information_bounds_evsi_and_rejects_invalid_direct_inputs():
+    result = calculate_value_of_information(
+        prior_alpha=2, prior_beta=8, threshold=.3, upside=1000, downside=-300,
+        experiments=[{"name": "landing", "sample_size": 1, "cost": 0}], iterations=1, seed=0,
+    )
+    experiment = result["experiments"][0]
+    assert 0 <= experiment["evsi_gross"] <= result["evpi"]
+    assert experiment["evsi_net"] == experiment["evsi_gross"]
+    with pytest.raises(ValueError, match="finite"):
+        calculate_value_of_information(
+            prior_alpha=float("nan"), prior_beta=1, threshold=.5, upside=1, downside=0,
+            experiments=[{"name": "test", "sample_size": 1, "cost": 0}],
+        )
+    with pytest.raises(ValueError, match="at least one"):
+        calculate_value_of_information(
+            prior_alpha=1, prior_beta=1, threshold=.5, upside=1, downside=0, experiments=[],
+        )
+
+
 def test_percentile_ranges():
     result = scenario_percentiles(np.arange(1, 101))
     assert result["low"] == pytest.approx(10.9)

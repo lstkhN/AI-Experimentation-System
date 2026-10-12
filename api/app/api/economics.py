@@ -166,16 +166,20 @@ def value_of_information(project_id: int, request: ValueOfInformationRequest, db
     result = calculate_value_of_information(**payload)
     snapshot = EconomicsModel(
         project_id=project_id,
-        economics_inputs={"value_of_information": request.model_dump()},
+        economics_inputs={
+            "value_of_information": request.model_dump(),
+            "formula_version": FORMULA_VERSION,
+            "input_provenance": {"default": "user_input", "simulation": "deterministic_seeded_rng"},
+        },
         result={"value_of_information": result},
-        reliability="RELIABLE",
+        reliability="HEURISTIC",
     )
     db.add(snapshot)
     db.flush()
     result["snapshot_id"] = snapshot.id
     record_audit_event(
         db, project_id=project_id, event_type="economics.value_of_information.calculated",
-        entity_type="project", entity_id=project_id,
+        entity_type="economics_snapshot", entity_id=snapshot.id,
         payload={"method": result["method"], "iterations": request.iterations, "seed": request.seed, "snapshot_id": snapshot.id},
     )
     db.commit()

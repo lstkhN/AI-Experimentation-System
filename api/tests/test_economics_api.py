@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.db.models import EconomicParameter, Evidence, EvidenceSource
+from app.db.models import AuditEvent, EconomicParameter, EconomicsModel, Evidence, EvidenceSource
 from sqlalchemy.pool import StaticPool
 
 from app.db.models import Base
@@ -136,6 +136,65 @@ def test_simulation_api_is_seeded_and_persists_provenance():
             price = db.query(EconomicParameter).filter_by(name="price").one()
             assert price.scenario_name == "base"
             assert price.distribution == {"kind": "uniform", "value": None, "low": 90.0, "high": 110.0, "mode": None, "mean": None, "stddev": None}
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_value_of_information_api_is_seeded_persists_snapshot_and_audit_event():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "VOI"}).json()
+        payload = {
+            "prior_alpha": 2, "prior_beta": 8, "decision_threshold": .3,
+            "upside": 1000, "downside": -300, "iterations": 500, "seed": 7,
+            "experiments": [{"name": "landing", "sample_size": 100, "cost": 50}],
+        }
+        first = client.post(f"/api/v1/projects/{project['id']}/economics/value-of-information", json=payload)
+        second = client.post(f"/api/v1/projects/{project['id']}/economics/value-of-information", json=payload)
+        assert first.status_code == second.status_code == 200
+        first_body, second_body = first.json(), second.json()
+        assert first_body["snapshot_id"] != second_body["snapshot_id"]
+        assert {key: value for key, value in first_body.items() if key != "snapshot_id"} == {
+            key: value for key, value in second_body.items() if key != "snapshot_id"
+        }
+        experiment = first_body["experiments"][0]
+        assert 0 <= experiment["evsi_gross"] <= first_body["evpi"]
+        assert experiment["evsi_net"] == experiment["evsi_gross"] - payload["experiments"][0]["cost"]
+        with Session(engine) as db:
+            snapshot = db.get(EconomicsModel, first_body["snapshot_id"])
+            assert snapshot.reliability == "HEURISTIC"
+            assert snapshot.economics_inputs["value_of_information"] == payload
+            assert snapshot.economics_inputs["formula_version"] == "economics-decision-v2"
+            assert snapshot.result["value_of_information"].get("snapshot_id") is None
+            event = db.query(AuditEvent).filter_by(
+                entity_id=snapshot.id, event_type="economics.value_of_information.calculated"
+            ).one()
+            assert event.entity_type == "economics_snapshot"
+            assert event.payload["snapshot_id"] == snapshot.id
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_value_of_information_api_validates_payload_and_project():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "VOI validation"}).json()
+        invalid = client.post(f"/api/v1/projects/{project['id']}/economics/value-of-information", json={
+            "prior_alpha": 0, "prior_beta": 1, "decision_threshold": 1,
+            "upside": 1, "downside": 0, "experiments": [],
+        })
+        assert invalid.status_code == 422
+        missing = client.post("/api/v1/projects/999/economics/value-of-information", json={
+            "prior_alpha": 1, "prior_beta": 1, "decision_threshold": .5,
+            "upside": 1, "downside": 0, "experiments": [{"name": "test", "sample_size": 1, "cost": 0}],
+        })
+        assert missing.status_code == 404
     finally:
         client.close()
         app.dependency_overrides.clear()

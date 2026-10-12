@@ -340,12 +340,17 @@ def calculate_value_of_information(*, prior_alpha: float, prior_beta: float, thr
                                    upside: float, downside: float, experiments: list[dict],
                                    iterations: int = 20_000, seed: int = 0) -> dict:
     """Estimate EVPI/EVSI with an explicit Beta-Binomial decision model."""
+    numeric_inputs = (prior_alpha, prior_beta, threshold, upside, downside)
+    if not all(math.isfinite(value) for value in numeric_inputs):
+        raise ValueError("value-of-information inputs must be finite")
     if prior_alpha <= 0 or prior_beta <= 0 or not 0 < threshold < 1:
         raise ValueError("prior alpha/beta must be positive and threshold must be between 0 and 1")
     if iterations < 1 or iterations > 100_000:
         raise ValueError("iterations must be between 1 and 100000")
     if upside < 0 or downside > 0:
         raise ValueError("upside must be non-negative and downside must be non-positive")
+    if not experiments:
+        raise ValueError("at least one experiment is required")
     rng = np.random.default_rng(seed)
     theta = rng.beta(prior_alpha, prior_beta, iterations)
     truth_is_good = theta >= threshold
@@ -358,13 +363,16 @@ def calculate_value_of_information(*, prior_alpha: float, prior_beta: float, thr
         name = str(experiment.get("name", "experiment"))
         sample_size = int(experiment.get("sample_size", 0))
         cost = float(experiment.get("cost", 0))
-        if sample_size < 1 or cost < 0:
-            raise ValueError("experiment sample_size must be positive and cost non-negative")
+        if sample_size < 1 or not math.isfinite(cost) or cost < 0:
+            raise ValueError("experiment sample_size must be positive and cost must be finite and non-negative")
         successes = rng.binomial(sample_size, theta)
         posterior_mean = (prior_alpha + successes) / (prior_alpha + prior_beta + sample_size)
         go_after = posterior_mean >= threshold
         after_utility = np.where(go_after, np.where(truth_is_good, upside, downside), 0.0)
-        gross = float(np.mean(after_utility) - current_value)
+        # Shared Monte Carlo draws make the estimates reproducible, but finite
+        # samples can otherwise violate the information-value bounds.  EVSI is
+        # non-negative before experiment cost and cannot exceed perfect info.
+        gross = min(evpi, max(0.0, float(np.mean(after_utility) - current_value)))
         net = gross - cost
         results.append({"name": name, "sample_size": sample_size, "cost": cost,
                         "evsi_gross": gross, "evsi_net": net,
