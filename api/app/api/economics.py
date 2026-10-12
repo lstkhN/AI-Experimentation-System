@@ -1,5 +1,6 @@
 """Project-scoped unit economics and capital-plan endpoints."""
 
+from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,7 +16,7 @@ from app.services.audit import record_audit_event
 router = APIRouter(prefix="/api/v1/projects/{project_id}/economics", tags=["economics"])
 
 
-def _trusted_source_ids(project_id: int, scenarios: list[dict], db: Session) -> dict[str, set[str]]:
+def _trusted_sources(project_id: int, scenarios: list[dict], db: Session) -> tuple[dict[str, set[str]], dict[tuple[str, str], dict]]:
     """Resolve submitted numeric evidence IDs within this project before reliability use."""
     requested: dict[str, set[str]] = {"verified_evidence": set(), "benchmark": set()}
     for scenario in scenarios:
@@ -27,7 +28,7 @@ def _trusted_source_ids(project_id: int, scenarios: list[dict], db: Session) -> 
                 requested[source["source_type"]].add(source_id.strip())
     numeric_ids = {int(value) for ids in requested.values() for value in ids}
     if not numeric_ids:
-        return {kind: set() for kind in requested}
+        return ({kind: set() for kind in requested}, {})
     rows = db.execute(
         select(Evidence, EvidenceSource)
         .join(EvidenceSource, Evidence.source_id == EvidenceSource.id)
@@ -35,21 +36,36 @@ def _trusted_source_ids(project_id: int, scenarios: list[dict], db: Session) -> 
     ).all()
     verified_ids = {str(evidence.id) for evidence, _source in rows}
     benchmark_ids = {str(evidence.id) for evidence, source in rows if source.source_type == "benchmark"}
-    return {
+    trusted_ids = {
         "verified_evidence": requested["verified_evidence"] & verified_ids,
         "benchmark": requested["benchmark"] & benchmark_ids,
     }
+    metadata: dict[tuple[str, str], dict] = {}
+    today = date.today()
+    for evidence, source in rows:
+        evidence_id = str(evidence.id)
+        observed = evidence.observed_on or evidence.captured_at.date()
+        # A 365-day linear freshness window is intentionally explicit and
+        # deterministic; stale evidence remains persisted but cannot qualify.
+        freshness = max(0.0, 1.0 - (today - observed).days / 365)
+        if evidence_id in trusted_ids["verified_evidence"]:
+            metadata[("verified_evidence", evidence_id)] = {"source_quality": evidence.source_quality, "freshness": freshness}
+        if evidence_id in trusted_ids["benchmark"]:
+            metadata[("benchmark", evidence_id)] = {"source_quality": evidence.source_quality, "freshness": freshness}
+    return trusted_ids, metadata
 
 
 def _calculate(request: EconomicsCalculateRequest | CapitalPlanRequest, project_id: int, db: Session) -> dict:
     payload = request.model_dump()
     sensitivity = payload.pop("sensitivity", None)
+    trusted_source_ids, trusted_source_metadata = _trusted_sources(project_id, payload["scenarios"], db)
     return calculate_economics(
         scenarios=payload["scenarios"],
         sensitivity_rates=sensitivity["monthly_churn_rates"] if sensitivity else None,
         capital_steps=payload["capital_steps"],
         currency=payload["currency"],
-        trusted_source_ids=_trusted_source_ids(project_id, payload["scenarios"], db),
+        trusted_source_ids=trusted_source_ids,
+        trusted_source_metadata=trusted_source_metadata,
     )
 
 
@@ -128,7 +144,8 @@ def simulate(project_id: int, request: EconomicsSimulationRequest, db: Annotated
     if db.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
     payload = request.model_dump()
-    result = simulate_economics(**payload, trusted_source_ids=_trusted_source_ids(project_id, payload["scenarios"], db))
+    trusted_source_ids, trusted_source_metadata = _trusted_sources(project_id, payload["scenarios"], db)
+    result = simulate_economics(**payload, trusted_source_ids=trusted_source_ids, trusted_source_metadata=trusted_source_metadata)
     snapshot = _save(project_id, request, result, db)
     record_audit_event(
         db, project_id=project_id, event_type="economics.simulation.created",

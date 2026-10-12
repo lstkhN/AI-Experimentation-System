@@ -1,5 +1,6 @@
 """Request schemas for project economics and capital planning."""
 
+from datetime import date
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -16,6 +17,10 @@ class ParameterProvenance(BaseModel):
     source_type: Literal["user_input", "verified_evidence", "benchmark", "inference"] = "user_input"
     source_id: str | None = Field(default=None, min_length=1, max_length=255)
     confidence: Literal["LOW", "MEDIUM", "HIGH"] = "LOW"
+    # These are retained as claimed provenance; project evidence remains the
+    # authority used for reliability checks.
+    source_quality: float | None = Field(default=None, ge=0, le=1)
+    observed_on: date | None = None
     observed: bool = False
     benchmark: bool = False
     inferred: bool = False

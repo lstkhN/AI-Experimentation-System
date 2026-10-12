@@ -43,6 +43,19 @@ def test_calculated_economics_gates_target_ratio_provenance():
     assert calculate_economics([scenario], trusted_source_ids={"verified_evidence": {"1"}})["reliability"] == "HEURISTIC"
 
 
+def test_reliability_checks_resolved_source_quality_and_freshness_and_exposes_deterministic_voi():
+    scenario = {"price": 100, "variable_cost": 20, "monthly_churn": .1, "cac": 120, "fixed_monthly_cost": 0, "target_ltv_cac_ratio": 3}
+    fields = ("price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost", "target_ltv_cac_ratio")
+    scenario["parameter_provenance"] = {field: {"source_type": "verified_evidence", "source_id": "1", "confidence": "HIGH", "observed": True} for field in fields}
+    metadata = {("verified_evidence", "1"): {"source_quality": .6, "freshness": 1}}
+    result = calculate_economics([scenario], capital_steps=[{"name": "test", "amount": 25}], trusted_source_ids={"verified_evidence": {"1"}}, trusted_source_metadata=metadata)
+    assert result["reliability"] == "HEURISTIC"
+    assert "base.price:low_source_quality" in result["reliability_failures"]
+    voi = result["scenarios"][0]["value_of_information"]
+    assert voi["method"] == "deterministic_evsi_evpi_heuristic_fallback"
+    assert voi["candidate_budgets"] == [25]
+
+
 def test_unit_economics_with_known_churn():
     result = unit_economics(UnitEconomics(price=100, variable_cost=20, monthly_churn=.1, cac=120, fixed_monthly_cost=800))
     assert result["gross_margin"] == pytest.approx(.8)

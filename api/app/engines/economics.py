@@ -23,6 +23,8 @@ HEURISTIC_CONTRACT = {
     "threshold": {
         "reliable_source_types": ["verified_evidence", "benchmark"],
         "minimum_confidence": "MEDIUM",
+        "minimum_source_quality": 0.7,
+        "minimum_freshness": 0.5,
         "source_id_required": True,
         "critical_parameters": list(CRITICAL_PARAMETERS),
         "calculation_critical_parameters": list(CALCULATION_CRITICAL_PARAMETERS),
@@ -52,6 +54,7 @@ def _draw_distribution(spec: dict, rng: np.random.Generator, iterations: int) ->
 def _reliability(
     scenarios: list[dict], *, required_parameters: tuple[str, ...] = CRITICAL_PARAMETERS,
     trusted_source_ids: dict[str, set[str]] | None = None,
+    trusted_source_metadata: dict[tuple[str, str], dict] | None = None,
 ) -> tuple[str, list[str]]:
     """Gate decision-grade reliability on provenance resolved by the project boundary.
 
@@ -62,6 +65,7 @@ def _reliability(
     qualifying_sources = set(HEURISTIC_CONTRACT["threshold"]["reliable_source_types"])
     qualifying_confidence = {"MEDIUM", "HIGH"}
     trusted_source_ids = trusted_source_ids or {}
+    trusted_source_metadata = trusted_source_metadata or {}
     for scenario in scenarios:
         name = scenario.get("name", "base")
         provenance = scenario.get("parameter_provenance") or {}
@@ -79,13 +83,22 @@ def _reliability(
                 "user_input": None,
             }.get(source_type)
             enabled_flags = {flag for flag in ("observed", "benchmark", "inferred") if source.get(flag)}
+            source_id = source.get("source_id", "").strip() if isinstance(source.get("source_id"), str) else ""
+            metadata = trusted_source_metadata.get((source_type, source_id))
+            # Direct engine callers can provide trusted IDs only (the legacy
+            # API); API callers provide DB-resolved quality/freshness metadata.
+            quality = (metadata or {}).get("source_quality", 1.0)
+            freshness = (metadata or {}).get("freshness", 1.0)
             if (source_type not in qualifying_sources
                     or source.get("confidence") not in qualifying_confidence
-                    or not isinstance(source.get("source_id"), str)
-                    or not source["source_id"].strip()
-                    or source["source_id"].strip() not in trusted_source_ids.get(source_type, set())
+                    or not source_id
+                    or source_id not in trusted_source_ids.get(source_type, set())
                     or enabled_flags != {expected_flag}):
                 failures.append(f"{name}.{parameter}:unqualified_provenance")
+            elif quality < HEURISTIC_CONTRACT["threshold"]["minimum_source_quality"]:
+                failures.append(f"{name}.{parameter}:low_source_quality")
+            elif freshness < HEURISTIC_CONTRACT["threshold"]["minimum_freshness"]:
+                failures.append(f"{name}.{parameter}:stale_source")
     if failures:
         return ("INSUFFICIENT_CRITICAL_INPUTS" if any(item.endswith(":missing") for item in failures) else "HEURISTIC", failures)
     return "RELIABLE", []
@@ -94,6 +107,7 @@ def _reliability(
 def simulate_economics(
     scenarios: list[dict], *, iterations: int = 5000, seed: int = 0, currency: str = "USD", capital_steps: list[dict] | None = None,
     trusted_source_ids: dict[str, set[str]] | None = None,
+    trusted_source_metadata: dict[tuple[str, str], dict] | None = None,
 ) -> dict:
     """Seeded Monte Carlo unit-economics simulation using only request distributions.
 
@@ -143,7 +157,18 @@ def simulate_economics(
                 "uncertainty_width_p90_minus_p10": float(np.percentile(contribution, 90) - np.percentile(contribution, 10)),
             },
         })
-    reliability, reliability_failures = _reliability(scenarios, trusted_source_ids=trusted_source_ids)
+    reliability, reliability_failures = _reliability(scenarios, trusted_source_ids=trusted_source_ids, trusted_source_metadata=trusted_source_metadata)
+    for result in output:
+        contribution = result["learning_value"]["contribution_after_cac"]
+        evpi = max(0.0, contribution["p90"] - contribution["p50"])
+        result["value_of_information"] = {
+            "method": "deterministic_evsi_evpi_heuristic_fallback",
+            "assumptions": ["EVPI/EVSI are per-customer contribution heuristics, not financial valuation.", "EVSI is capped at EVPI and assumes a 50% learning capture rate."],
+            "threshold": {"reliability_required": "RELIABLE"},
+            "evpi": evpi,
+            "evsi": evpi * 0.5,
+            "candidate_budgets": {key: value["p50"] for key, value in result["budget"].items() if key != "currency"},
+        }
     return {
         "formula_version": FORMULA_VERSION,
         "decision_contract": HEURISTIC_CONTRACT,
@@ -226,6 +251,7 @@ def calculate_economics(
     capital_steps: list[dict] | None = None,
     currency: str = "USD",
     trusted_source_ids: dict[str, set[str]] | None = None,
+    trusted_source_metadata: dict[tuple[str, str], dict] | None = None,
 ) -> dict:
     """Calculate project economics deterministically from JSON-safe assumptions."""
     calculated = []
@@ -256,6 +282,7 @@ def calculate_economics(
         scenarios,
         required_parameters=CALCULATION_CRITICAL_PARAMETERS,
         trusted_source_ids=trusted_source_ids,
+        trusted_source_metadata=trusted_source_metadata,
     )
     has_metrics = calculated and not unknowns and all(
         scenario["metrics"].get("ltv_simple") is not None
@@ -263,6 +290,16 @@ def calculate_economics(
         for scenario in calculated
     )
     reliability = provenance_reliability if has_metrics else "INSUFFICIENT_CRITICAL_INPUTS"
+    candidate_budgets = [step["amount"] for step in normalized_steps]
+    for item in calculated:
+        item["value_of_information"] = {
+            "method": "deterministic_evsi_evpi_heuristic_fallback",
+            "assumptions": ["Point assumptions have no modeled uncertainty; EVPI and EVSI default to zero.", "Candidate budgets are submitted capital steps."],
+            "threshold": {"reliability_required": "RELIABLE"},
+            "evpi": 0.0,
+            "evsi": 0.0,
+            "candidate_budgets": candidate_budgets,
+        }
     return {
         "formula_version": FORMULA_VERSION,
         "decision_contract": HEURISTIC_CONTRACT,
