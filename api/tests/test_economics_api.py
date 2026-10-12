@@ -184,6 +184,34 @@ def test_value_of_information_api_is_seeded_persists_snapshot_and_audit_event():
         engine.dispose()
 
 
+def test_get_value_of_information_returns_latest_snapshot_and_empty_state():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "Saved VOI"}).json()
+        path = f"/api/v1/projects/{project['id']}/economics/value-of-information"
+        assert client.get(path).status_code == 404
+        first = client.post(path, json={
+            "prior_alpha": 2, "prior_beta": 8, "decision_threshold": .3,
+            "upside": 1000, "downside": -300, "experiments": [{"name": "first", "sample_size": 20, "cost": 10}],
+            "iterations": 100, "seed": 3,
+        }).json()
+        latest = client.post(path, json={
+            "prior_alpha": 2, "prior_beta": 8, "decision_threshold": .3,
+            "upside": 1000, "downside": -300, "experiments": [{"name": "latest", "sample_size": 30, "cost": 20}],
+            "iterations": 100, "seed": 4,
+        }).json()
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.json()["snapshot_id"] == latest["snapshot_id"]
+        assert response.json()["snapshot_id"] != first["snapshot_id"]
+        assert response.json()["experiments"][0]["name"] == "latest"
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_value_of_information_does_not_replace_primary_economics_for_verdict():
     client, engine = _client()
     try:

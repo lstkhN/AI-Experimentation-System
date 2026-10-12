@@ -191,6 +191,28 @@ def value_of_information(project_id: int, request: ValueOfInformationRequest, db
     return result
 
 
+@router.get("/value-of-information")
+def get_value_of_information(project_id: int, db: Annotated[Session, Depends(get_db)]) -> dict:
+    """Return the latest saved Bayesian value-of-information snapshot."""
+    if db.get(Project, project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    snapshots = db.scalars(
+        select(EconomicsModel)
+        .where(EconomicsModel.project_id == project_id)
+        .order_by(EconomicsModel.id.desc())
+    ).all()
+    snapshot = next(
+        (
+            item for item in snapshots
+            if isinstance(item.result, dict) and isinstance(item.result.get("value_of_information"), dict)
+        ),
+        None,
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Value of information snapshot not found")
+    return {"snapshot_id": snapshot.id, **snapshot.result["value_of_information"]}
+
+
 @router.post("/capital-plan")
 def create_capital_plan(project_id: int, request: CapitalPlanRequest, db: Annotated[Session, Depends(get_db)]) -> dict:
     """Save a capital plan; economics scenarios are optional for a funding-only plan."""

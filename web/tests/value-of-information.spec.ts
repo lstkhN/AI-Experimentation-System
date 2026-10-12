@@ -4,6 +4,7 @@ test('calculates and displays Bayesian value of information', async ({ page }) =
   await page.route('**/api/v1/projects', route => route.fulfill({ json: [{ id: 9090, name: 'VOI project', language: 'en' }] }));
   await page.route('**/api/v1/projects/9090/**', async route => {
     const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/economics/value-of-information') && route.request().method() === 'GET') return route.fulfill({ status: 404, json: { detail: 'Value of information snapshot not found' } });
     if (path.endsWith('/economics/value-of-information')) {
       expect(route.request().method()).toBe('POST');
       expect(route.request().postDataJSON()).toMatchObject({ prior_alpha: 1, prior_beta: 1, decision_threshold: 0.5, iterations: 5000, seed: 0, experiments: [{ name: 'Validation experiment', sample_size: 100, cost: 100 }] });
