@@ -175,7 +175,7 @@ test('stopped runs hydrate measurements and persisted gate checks render recursi
   await expect(page.getByText('фактическое значение', { exact: true })).toBeVisible();
 });
 
-test('project switcher filters projects, exposes its active state, and supports arrow navigation', async ({ page }) => {
+test('sidebar project switcher filters projects, exposes its active state, and supports arrow navigation', async ({ page }) => {
   await page.route('**/api/v1/projects', route => route.fulfill({ json: [
     { id: 9600, name: 'Alpha workspace', language: 'en' }, { id: 9601, name: 'Beta workspace', language: 'en' },
   ] }));
@@ -186,6 +186,9 @@ test('project switcher filters projects, exposes its active state, and supports 
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto('/');
+  await expect(page.locator('.project-sidebar')).toBeVisible();
+  await expect(page.locator('.workspace-layout')).toBeVisible();
+  await expect(page.locator('.project-sidebar')).toHaveCSS('position', 'sticky');
   const search = page.getByLabel('Find a project');
   await search.fill('Beta');
   await expect(page.getByRole('button', { name: 'Alpha workspace' })).toHaveCount(0);
@@ -198,4 +201,8 @@ test('project switcher filters projects, exposes its active state, and supports 
   await expect(page.getByRole('button', { name: 'Beta workspace' })).toHaveAttribute('aria-current', 'true');
   await search.fill('not found');
   await expect(page.getByText('No projects match your search.')).toBeVisible();
+  await search.fill('');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('.project-sidebar')).toHaveCSS('position', 'static');
+  await expect(page.locator('.project-sidebar .projects')).toHaveCSS('display', 'flex');
 });
