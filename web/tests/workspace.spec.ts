@@ -185,10 +185,14 @@ test('sidebar project switcher filters projects, exposes its active state, and s
     if (path.endsWith('/hypotheses')) return route.fulfill({ json: [] });
     return route.fulfill({ status: 404, json: {} });
   });
+  await page.setViewportSize({ width: 1280, height: 844 });
   await page.goto('/');
   await expect(page.locator('.project-sidebar')).toBeVisible();
   await expect(page.locator('.workspace-layout')).toBeVisible();
   await expect(page.locator('.project-sidebar')).toHaveCSS('position', 'sticky');
+  const [sidebarBox, intakeBox] = await Promise.all([page.locator('.project-sidebar').boundingBox(), page.locator('.intake').boundingBox()]);
+  expect((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0)).toBeLessThanOrEqual(intakeBox?.x ?? 0);
+  expect(sidebarBox?.y).toBeCloseTo(intakeBox?.y ?? 0, 0);
   const search = page.getByLabel('Find a project');
   await search.fill('Beta');
   await expect(page.getByRole('button', { name: 'Alpha workspace' })).toHaveCount(0);

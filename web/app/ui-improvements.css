@@ -47,7 +47,7 @@ input,textarea,select { border:1px solid #d9deeb; border-radius:10px; padding:12
 .project-sidebar { position:sticky; top:18px; max-height:calc(100vh - 36px); overflow:auto; padding:2px; }
 .workspace-layout .project-switcher { margin-top:0; padding:18px; }
 .workspace-content { min-width:0; }
-.workspace-content .workspace { margin-top:0; }
+.workspace-layout .intake,.workspace-content .workspace { margin-top:0; }
 .workspace-layout .project-switcher .project-switcher-heading { display:grid; gap:14px; }
 .workspace-layout .project-switcher .project-search { width:100%; }
 .workspace-layout .project-switcher .projects { grid-template-columns:1fr; }
