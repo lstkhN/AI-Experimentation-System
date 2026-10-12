@@ -35,7 +35,7 @@ def test_verification_records_freshness_independence_contradictions_and_report_p
         assert len(attempts) == 2
         assert all(item.freshness_score > .99 for item in attempts)
         assert all(item.provenance["source_cluster"] in {"a.test", "b.test"} for item in attempts)
-        assert len(db.scalars(select(ResearchClaimContradiction))) == 1
+        assert len(db.scalars(select(ResearchClaimContradiction)).all()) == 1
         cluster_stage = db.scalar(select(ResearchStageRun).where(ResearchStageRun.analysis_run_id == run.id,
                                                                   ResearchStageRun.stage == "cluster"))
         assert cluster_stage.output["contradictions"]
