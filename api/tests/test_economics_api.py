@@ -181,6 +181,32 @@ def test_value_of_information_api_is_seeded_persists_snapshot_and_audit_event():
         engine.dispose()
 
 
+def test_value_of_information_does_not_replace_primary_economics_for_verdict():
+    client, engine = _client()
+    try:
+        project = client.post("/api/v1/projects", json={"name": "VOI verdict ordering"}).json()
+        economics = client.post(f"/api/v1/projects/{project['id']}/economics/calculate", json={
+            "scenarios": [{"name": "base", "price": 100, "variable_cost": 20, "monthly_churn": 0.1, "cac": 120}],
+        })
+        assert economics.status_code == 200
+        voi = client.post(f"/api/v1/projects/{project['id']}/economics/value-of-information", json={
+            "prior_alpha": 2, "prior_beta": 8, "decision_threshold": .3,
+            "upside": 1000, "downside": -300,
+            "experiments": [{"name": "landing", "sample_size": 20, "cost": 10}],
+            "iterations": 100, "seed": 3,
+        })
+        assert voi.status_code == 200
+        verdict = client.post(f"/api/v1/projects/{project['id']}/verdict")
+        assert verdict.status_code == 201
+        assert verdict.json()["economics"]["snapshot_id"] == economics.json()["snapshot_id"]
+        assert verdict.json()["economics"]["snapshot_id"] != voi.json()["snapshot_id"]
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
 def test_value_of_information_api_validates_payload_and_project():
     client, engine = _client()
     try:

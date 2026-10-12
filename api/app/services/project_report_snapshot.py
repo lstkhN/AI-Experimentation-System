@@ -40,8 +40,16 @@ def _hypothesis_inputs(project_id: int, db: Session) -> list[dict[str, Any]]:
 
 
 def _economics(project_id: int, db: Session) -> tuple[dict[str, Any] | None, EconomicsModel | None]:
-    snapshot = db.scalar(select(EconomicsModel).where(EconomicsModel.project_id == project_id)
-                         .order_by(EconomicsModel.created_at.desc(), EconomicsModel.id.desc()).limit(1))
+    # VOI is persisted for audit/history, but it must not become the primary
+    # unit-economics snapshot used by verdicts and capital gates.
+    snapshots = db.scalars(
+        select(EconomicsModel).where(EconomicsModel.project_id == project_id)
+        .order_by(EconomicsModel.created_at.desc(), EconomicsModel.id.desc())
+    ).all()
+    snapshot = next(
+        (item for item in snapshots if not isinstance(item.result, dict) or "value_of_information" not in item.result),
+        None,
+    )
     if snapshot is None:
         return None, None
     return {"snapshot_id": snapshot.id, "inputs": snapshot.economics_inputs, "result": snapshot.result, "reliability": snapshot.reliability}, snapshot
