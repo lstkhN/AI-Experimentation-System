@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.db.models import Base
+from app.db.models import Base, EconomicsModel, Evidence, EvidenceSource, ExperimentRun, Hypothesis
 from app.db.session import get_db
 from app.main import app
 from app.engines.capital_allocator import allocate_capital
@@ -16,6 +16,12 @@ def test_pure_engines_are_deterministic_and_sequential():
     assert calculate_experiment_economics(estimated_cost=100, success_probability=.5, upside=300, learning_value=10)["recommended_spend"] == 100
     result = allocate_capital(150, [{"recommended_spend": 100, "gate_unlocked": True}, {"recommended_spend": 100, "gate_unlocked": True}])
     assert [item["status"] for item in result["allocations"]] == ["ALLOCATED", "PARTIAL"]
+
+
+def _reliable_economics(factory, project_id):
+    with factory() as db:
+        db.add(EconomicsModel(project_id=project_id, economics_inputs={}, result={}, reliability="RELIABLE"))
+        db.commit()
 
 
 def test_capital_plan_gate_evaluation_and_allocation():
@@ -29,6 +35,7 @@ def test_capital_plan_gate_evaluation_and_allocation():
     client = TestClient(app)
     try:
         project = client.post("/api/v1/projects", json={"name": "Capital"}).json()
+        _reliable_economics(factory, project["id"])
         response = client.post(f"/api/v1/projects/{project['id']}/capital-plans", json={"available_budget": 150, "gates": [
             {"name": "learn", "recommended_spend": 100, "unlock_conditions": [{"metric": "interviews", "operator": ">=", "value": 10}]},
             {"name": "scale", "recommended_spend": 100},
@@ -143,6 +150,7 @@ def test_sqlite_concurrent_distinct_allocation_keys_preserve_budget_invariant(tm
         with TestClient(app) as client:
             project = client.post("/api/v1/projects", json={"name": "Distinct allocation"}).json()
             plan = client.post(f"/api/v1/projects/{project['id']}/capital-plans", json={"available_budget": 100, "gates": [{"name": "fund", "recommended_spend": 100, "unlock_conditions": []}]}).json()
+            _reliable_economics(factory, project["id"])
             client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/gates/evaluate", json={"metrics": {}})
         responses = _sqlite_concurrent_requests(factory, lambda client: client.post(
             f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/allocate",
@@ -174,6 +182,7 @@ def test_sqlite_concurrent_same_key_allocation_replays_without_overspending(tmp_
             plan = client.post(f"/api/v1/projects/{project['id']}/capital-plans", json={"available_budget": 100, "gates": [
                 {"name": "fund", "recommended_spend": 100, "unlock_conditions": []},
             ]}).json()
+            _reliable_economics(factory, project["id"])
             client.post(f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/gates/evaluate", json={"metrics": {}})
         responses = _sqlite_concurrent_requests(factory, lambda client: client.post(
             f"/api/v1/projects/{project['id']}/capital-plans/{plan['id']}/allocate",
