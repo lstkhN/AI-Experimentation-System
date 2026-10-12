@@ -174,3 +174,28 @@ test('stopped runs hydrate measurements and persisted gate checks render recursi
   await expect(page.getByText('проверки', { exact: true })).toBeVisible();
   await expect(page.getByText('фактическое значение', { exact: true })).toBeVisible();
 });
+
+test('project switcher filters projects, exposes its active state, and supports arrow navigation', async ({ page }) => {
+  await page.route('**/api/v1/projects', route => route.fulfill({ json: [
+    { id: 9600, name: 'Alpha workspace', language: 'en' }, { id: 9601, name: 'Beta workspace', language: 'en' },
+  ] }));
+  await page.route('**/api/v1/projects/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (/(analysis-runs|history|experiments|experiment-runs|capital-plans)$/.test(path)) return route.fulfill({ json: [] });
+    if (path.endsWith('/hypotheses')) return route.fulfill({ json: [] });
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto('/');
+  const search = page.getByLabel('Find a project');
+  await search.fill('Beta');
+  await expect(page.getByRole('button', { name: 'Alpha workspace' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Beta workspace' })).toBeVisible();
+  await search.fill('');
+  await page.getByRole('button', { name: 'Alpha workspace' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.getByRole('button', { name: 'Beta workspace' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('button', { name: 'Beta workspace' })).toHaveAttribute('aria-current', 'true');
+  await search.fill('not found');
+  await expect(page.getByText('No projects match your search.')).toBeVisible();
+});
