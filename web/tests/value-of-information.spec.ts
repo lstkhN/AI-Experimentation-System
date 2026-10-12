@@ -23,3 +23,23 @@ test('calculates and displays Bayesian value of information', async ({ page }) =
   await expect(page.getByText('80.00')).toBeVisible();
   await expect(page.getByText('No experiment recommended')).toBeVisible();
 });
+
+test('Russian value-of-information view localizes decision and backend prose', async ({ page }) => {
+  await page.route('**/api/v1/projects', route => route.fulfill({ json: [{ id: 9091, name: 'Ценность информации', language: 'ru' }] }));
+  await page.route('**/api/v1/projects/9091/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/economics/value-of-information')) return route.fulfill({ json: { current_decision: 'GO', current_value: 100, evpi: 80, experiments: [{ name: 'Validation experiment', sample_size: 100, cost: 100, evsi_gross: 50, evsi_net: -50, decision_change_probability: 0.2, recommended: true }], recommended_experiment: 'Validation experiment', provenance: { iterations: 5000, seed: 0, rng: 'numpy.PCG64' }, assumptions: ['Unknown success rate follows a Beta prior.'] } });
+    if (/(analysis-runs|history|experiments|experiment-runs|capital-plans)$/.test(path)) return route.fulfill({ json: [] });
+    if (path.endsWith('/hypotheses')) return route.fulfill({ json: [] });
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Ценность информации' }).click();
+  await page.getByRole('tab', { name: 'Юнит-экономика' }).click();
+  await expect(page.getByRole('heading', { name: 'Ценность информации', exact: true })).toBeVisible();
+  await expect(page.getByText('Байесовская оценка ценности эксперимента для решения «запускать / остановить».')).toBeVisible();
+  await expect(page.getByText('Текущее решение: запуск')).toBeVisible();
+  await expect(page.getByText('Априорный параметр альфа')).toBeVisible();
+  await expect(page.getByText('Validation experiment', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Unknown success rate follows a Beta prior.', { exact: true })).toHaveCount(0);
+});
