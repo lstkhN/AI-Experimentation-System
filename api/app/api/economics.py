@@ -140,7 +140,12 @@ def calculate(project_id: int, request: EconomicsCalculateRequest, db: Annotated
 
 @router.post("/simulate")
 def simulate(project_id: int, request: EconomicsSimulationRequest, db: Annotated[Session, Depends(get_db)]) -> dict:
-    """Run a reproducible, non-LLM Monte Carlo economics simulation and save it."""
+    """Run the legacy distribution-based simulator; its EVSI/EVPI fields remain heuristic.
+
+    This request contract does not provide Bayesian prior, likelihood, threshold,
+    or utility inputs, so callers needing probabilistic VOI must use
+    ``/value-of-information`` rather than treating this response as Bayesian.
+    """
     if db.get(Project, project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
     payload = request.model_dump()

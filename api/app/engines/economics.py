@@ -162,6 +162,9 @@ def simulate_economics(
         contribution = result["learning_value"]["contribution_after_cac"]
         evpi = max(0.0, contribution["p90"] - contribution["p50"])
         result["value_of_information"] = {
+            # The legacy simulator accepts unit-economics distributions, not the
+            # prior/likelihood/utility inputs required by the Bayesian VOI API.
+            "status": "HEURISTIC",
             "method": "deterministic_evsi_evpi_heuristic_fallback",
             "assumptions": ["EVPI/EVSI are per-customer contribution heuristics, not financial valuation.", "EVSI is capped at EVPI and assumes a 50% learning capture rate."],
             "threshold": {"reliability_required": "RELIABLE"},
@@ -293,6 +296,7 @@ def calculate_economics(
     candidate_budgets = [step["amount"] for step in normalized_steps]
     for item in calculated:
         item["value_of_information"] = {
+            "status": "HEURISTIC",
             "method": "deterministic_evsi_evpi_heuristic_fallback",
             "assumptions": ["Point assumptions have no modeled uncertainty; EVPI and EVSI default to zero.", "Candidate budgets are submitted capital steps."],
             "threshold": {"reliability_required": "RELIABLE"},

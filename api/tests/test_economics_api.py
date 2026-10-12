@@ -131,6 +131,9 @@ def test_simulation_api_is_seeded_and_persists_provenance():
         assert body["provenance"]["seed"] == 9
         assert set(body["scenarios"][0]["payback_months"]) == {"p10", "p50", "p90"}
         assert body["reliability"] == "HEURISTIC"
+        legacy_voi = body["scenarios"][0]["value_of_information"]
+        assert legacy_voi["status"] == "HEURISTIC"
+        assert legacy_voi["method"] == "deterministic_evsi_evpi_heuristic_fallback"
         assert body["decision_contract"]["threshold"]["critical_parameters"] == ["price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost"]
         with Session(engine) as db:
             price = db.query(EconomicParameter).filter_by(name="price").one()

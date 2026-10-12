@@ -27,7 +27,9 @@ def test_unresolved_caller_source_ids_cannot_make_simulation_reliable():
             for field in ("price", "variable_cost", "monthly_churn", "cac", "fixed_monthly_cost")
         },
     }
-    assert simulate_economics([scenario], iterations=1)["reliability"] == "HEURISTIC"
+    heuristic = simulate_economics([scenario], iterations=1)
+    assert heuristic["reliability"] == "HEURISTIC"
+    assert heuristic["scenarios"][0]["value_of_information"]["status"] == "HEURISTIC"
     assert simulate_economics([scenario], iterations=1, trusted_source_ids={"verified_evidence": {"999"}})["reliability"] == "RELIABLE"
 
 
@@ -52,6 +54,7 @@ def test_reliability_checks_resolved_source_quality_and_freshness_and_exposes_de
     assert result["reliability"] == "HEURISTIC"
     assert "base.price:low_source_quality" in result["reliability_failures"]
     voi = result["scenarios"][0]["value_of_information"]
+    assert voi["status"] == "HEURISTIC"
     assert voi["method"] == "deterministic_evsi_evpi_heuristic_fallback"
     assert voi["candidate_budgets"] == [25]
 

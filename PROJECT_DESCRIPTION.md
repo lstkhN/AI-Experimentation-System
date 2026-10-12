@@ -197,6 +197,8 @@ Deterministic Verdict Engine рассчитывает:
 
 Каждый economics snapshot сохраняет входные данные и результат. Модель `EconomicParameter` для provenance уже добавлена, однако автоматическое заполнение provenance для каждого Monte Carlo parameter и полное влияние reliability-gating на все economics flows ещё требуют завершения.
 
+Совместимый legacy `POST /api/v1/projects/{project_id}/economics/simulate` принимает распределения unit economics и сохраняется без перенаправления: его контракт не содержит Beta prior, Binomial likelihood, decision threshold или utilities, необходимые для байесовской оценки. Поэтому `scenarios[].value_of_information.status` всегда `HEURISTIC`; его EVPI/EVSI — только deterministic per-customer contribution fallback, а не вероятностная финансовая модель. Для явной байесовской модели нужно вызывать `POST /api/v1/projects/{project_id}/economics/value-of-information`, передавая prior, threshold, utilities и candidate experiments.
+
 ### 3.8 Experiments
 
 Система предлагает тесты с:
@@ -339,6 +341,7 @@ GET    /api/v1/projects/{project_id}/verdict
 
 POST   /api/v1/projects/{project_id}/economics/calculate
 POST   /api/v1/projects/{project_id}/economics/simulate
+POST   /api/v1/projects/{project_id}/economics/value-of-information
 POST   /api/v1/projects/{project_id}/economics/capital-plan
 
 GET    /api/v1/projects/{project_id}/experiments/templates
