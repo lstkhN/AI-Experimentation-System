@@ -179,7 +179,7 @@ test('project switcher filters projects, exposes its active state, and supports 
   await page.route('**/api/v1/projects', route => route.fulfill({ json: [
     { id: 9600, name: 'Alpha workspace', language: 'en' }, { id: 9601, name: 'Beta workspace', language: 'en' },
   ] }));
-  await page.route('**/api/v1/projects/**', route => {
+  await page.route(/\/api\/v1\/projects\/\d+\/.*/, route => {
     const path = new URL(route.request().url()).pathname;
     if (/(analysis-runs|history|experiments|experiment-runs|capital-plans)$/.test(path)) return route.fulfill({ json: [] });
     if (path.endsWith('/hypotheses')) return route.fulfill({ json: [] });
