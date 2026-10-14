@@ -50,4 +50,4 @@
 - Все database migrations применяются на чистой PostgreSQL.
 - Backend tests, frontend build, axe, full Compose Playwright lifecycle проходят.
 - Нет silent skips, post-call cap violations, client metric bypasses или overspend races.
-- `PROJECT_DESCRIPTION.md` обновлён только после успешного полного прогона.
+- Документация проекта обновляется только после успешного полного прогона.

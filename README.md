@@ -1,58 +1,119 @@
 # AI Experimentation System
 
-Подробное описание продукта, архитектуры, lifecycle анализа, verdict-правил,
-экспериментов, endpoint-групп и ограничений находится в
-[`PROJECT_DESCRIPTION.md`](PROJECT_DESCRIPTION.md).
+Локальная система для структурированной проверки бизнес-идей: от описания проекта и гипотез до анализа доказательств, экономики, экспериментов и итогового решения.
 
-## API database migrations
+> Проект находится в активной разработке. Это локальный single-user инструмент, а не готовый production SaaS.
 
-Database schema is managed by Alembic; the API does not mutate schema on startup. In Docker Compose, the one-shot `migrator` service runs `upgrade head` before the API starts.
+## Возможности
 
-From the repository root:
+- intake проекта на русском и английском языках;
+- автоматическое формирование и ранжирование гипотез;
+- research через подключаемый search provider или локальный fallback;
+- Evidence Ledger с источниками, provenance и оценкой качества;
+- детерминированные verdict по гипотезам и проекту: `PROMISING`, `WEAK`, `NO-GO-FOR-NOW`, `UNPROVEN`;
+- unit economics, sensitivity analysis и Monte Carlo simulation;
+- value of information, capital plan и capital gates;
+- шаблоны экспериментов и lifecycle `proposed → approved → running → completed`;
+- ввод измерений и сравнение фактических результатов с прогнозом;
+- audit history и экспорт в JSON, Markdown и HTML;
+- Docker Compose для запуска всех сервисов.
 
-```bash
-# Install API dependencies (includes Alembic)
-pip install -r api/requirements.txt
+Система помогает принимать решения на основе проверяемых данных. Она не заменяет интервью, платные пилоты или реальное рыночное исследование: неподтверждённые search snippets не считаются доказательствами автоматически.
 
-# Apply all migrations locally; DATABASE_URL defaults to sqlite:///./app.db
-DATABASE_URL='postgresql+psycopg://analyst:analyst@localhost:5432/analyst' \
-  alembic -c alembic.ini upgrade head
+## Архитектура
 
-# Verify the database revision and detect ORM metadata changes without a migration
-alembic -c alembic.ini current
-alembic -c alembic.ini check
+- **Backend:** Python 3.12, FastAPI, SQLAlchemy, Alembic;
+- **База данных:** PostgreSQL в Compose, SQLite для локальных тестов;
+- **Worker:** отдельный процесс для очереди analysis runs;
+- **Frontend:** Next.js, React, TypeScript;
+- **Проверки:** pytest, frontend build и Playwright.
 
-# Generate a reviewed migration after changing app.db.models
-alembic -c alembic.ini revision --autogenerate -m "describe schema change"
+Структура основных каталогов:
+
+```text
+api/app/api/       HTTP endpoints
+api/app/db/        модели и сессии SQLAlchemy
+api/app/engines/   детерминированная бизнес-логика
+api/app/services/  orchestration, research, snapshots и audit
+api/app/workers/   worker очереди анализа
+api/tests/         backend-тесты
+web/app/           Next.js интерфейс
+web/tests/         UI/E2E-тесты
 ```
 
-Run API tests with:
+## Быстрый запуск через Docker
 
-```bash
-cd api && pytest
-```
-
-## Run and operate
+Требуется Docker с Docker Compose.
 
 ```bash
 cp .env.example .env
-# Optional: set OPENAI_API_KEY and SEARCH_API_KEY in .env
+# При необходимости добавьте ключи в .env:
+# OPENAI_API_KEY=...
+# SEARCH_API_KEY=...
 docker compose up --build
 ```
 
-The API is bound to `127.0.0.1:8000` and the web UI to `127.0.0.1:3000`.
-`/health` is a dependency-free liveness probe; `/ready` additionally checks the
-DB connection and that Alembic is at the expected revision. Compose waits for
-Postgres, migrations, and API health before starting dependent services.
+После запуска:
 
-The UI supports English and Russian project intake and generated starter/LLM
-hypotheses. Existing projects can be selected from the project list, where
-project audit history is also available. Reports can be downloaded as Markdown
-or opened as a safe print-ready HTML document and saved as PDF by the browser.
+- Web: http://127.0.0.1:3000
+- API: http://127.0.0.1:8000
+- API docs: http://127.0.0.1:8000/docs
+- liveness: http://127.0.0.1:8000/health
+- readiness: http://127.0.0.1:8000/ready
 
-CI runs API tests, verifies migration metadata with `alembic check`, and builds
-the Next.js application. To run the same web validation locally:
+Миграции применяются отдельным сервисом `migrator`; API не изменяет схему базы при старте.
+
+## Локальная разработка и проверки
+
+Backend:
 
 ```bash
-cd web && npm ci && npm run build
+pip install -r api/requirements.txt
+cd api
+pytest -q
+cd ..
 ```
+
+Проверка миграций:
+
+```bash
+alembic -c alembic.ini upgrade head
+alembic -c alembic.ini current
+alembic -c alembic.ini check
+```
+
+Frontend:
+
+```bash
+cd web
+npm ci
+npm run build
+npm run test:e2e
+```
+
+## Основные API-группы
+
+```text
+POST/GET /api/v1/projects
+POST/GET /api/v1/projects/{id}/analysis-runs
+POST/GET /api/v1/projects/{id}/hypotheses
+POST/GET /api/v1/projects/{id}/evidence
+POST/GET /api/v1/projects/{id}/verdict
+POST     /api/v1/projects/{id}/economics/calculate
+POST     /api/v1/projects/{id}/economics/simulate
+POST     /api/v1/projects/{id}/economics/value-of-information
+POST/GET /api/v1/projects/{id}/experiments/*
+GET      /api/v1/projects/{id}/export/{json|markdown|html}
+```
+
+Полная интерактивная спецификация доступна в `/docs` после запуска API.
+
+## Конфигурация и безопасность
+
+Секреты задаются только через `.env`, который не должен добавляться в Git. В репозитории находится только `.env.example` с пустыми значениями. Не публикуйте API-ключи, реальные пользовательские данные или локальные базы данных.
+
+Значения PostgreSQL по умолчанию (`analyst`/`analyst`) предназначены только для локального Docker-запуска. Для публичного или production-развёртывания их необходимо заменить и добавить authentication, HTTPS, управление доступом и отдельную политику хранения данных.
+
+## Лицензия
+
+Проект распространяется по лицензии MIT. См. [LICENSE](LICENSE).
