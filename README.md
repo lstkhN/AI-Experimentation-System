@@ -1,8 +1,49 @@
-# AI Experimentation System
+<div align="center">
+  <img src="assets/logo.svg" alt="AI Experimentation System" width="720" />
+  <h1>AI Experimentation System</h1>
+  <p><strong>Проверяйте бизнес-идеи доказательствами, а не энтузиазмом.</strong></p>
+  <p>
+    <a href="https://github.com/lstkhN/AI-Experimentation-System/actions"><img src="https://img.shields.io/github/actions/workflow/status/lstkhN/AI-Experimentation-System/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/lstkhN/AI-Experimentation-System?style=flat-square" alt="MIT license" /></a>
+    <img src="https://img.shields.io/badge/status-active%20development-5367a5?style=flat-square" alt="Active development" />
+  </p>
+</div>
 
-Локальная система для структурированной проверки бизнес-идей: от описания проекта и гипотез до анализа доказательств, экономики, экспериментов и итогового решения.
+---
+
+## Что это?
+
+**AI Experimentation System** — локальная система для принятия решений по бизнес-идеям. Она превращает сырое описание идеи в последовательный процесс:
+
+```text
+Идея → Гипотезы → Доказательства → Экономика → Эксперимент → Решение
+```
+
+Вместо очередного красивого AI-текста вы получаете видимый reasoning-процесс: что известно, чему можно верить, какие данные противоречат идее и какой тест нужно запустить следующим.
 
 > Проект находится в активной разработке. Это локальный single-user инструмент, а не готовый production SaaS.
+
+## Почему это интересно
+
+| Проблема | Что делает система |
+| --- | --- |
+| Идея кажется хорошей, но непонятно почему | Разбивает её на проверяемые гипотезы |
+| Research превращается в набор ссылок | Ведёт Evidence Ledger с provenance и качеством источников |
+| Финансовая модель держится на догадках | Считает unit economics, sensitivity и Monte Carlo-сценарии |
+| Команда не знает, что делать дальше | Предлагает следующий эксперимент с pass/fail-правилами |
+| Результаты теряются в заметках | Сохраняет audit history и экспортирует decision report |
+
+## Интерфейс
+
+### Рабочее пространство
+
+![Превью рабочего пространства](docs/screenshots/dashboard.svg)
+
+### Decision report
+
+![Превью decision report](docs/screenshots/decision-report.svg)
+
+> Изображения — визуальное превью основных сценариев интерфейса. Рабочая версия запускается локально через Docker Compose.
 
 ## Возможности
 
@@ -28,8 +69,6 @@
 - **Frontend:** Next.js, React, TypeScript;
 - **Проверки:** pytest, frontend build и Playwright.
 
-Структура основных каталогов:
-
 ```text
 api/app/api/       HTTP endpoints
 api/app/db/        модели и сессии SQLAlchemy
@@ -41,7 +80,7 @@ web/app/           Next.js интерфейс
 web/tests/         UI/E2E-тесты
 ```
 
-## Быстрый запуск через Docker
+## Быстрый запуск
 
 Требуется Docker с Docker Compose.
 
@@ -65,30 +104,22 @@ docker compose up --build
 
 ## Локальная разработка и проверки
 
-Backend:
-
 ```bash
 pip install -r api/requirements.txt
 cd api
 pytest -q
-cd ..
+cd ../web
+npm ci
+npm run build
+npm run test:e2e
 ```
 
-Проверка миграций:
+Проверка миграций из корня проекта:
 
 ```bash
 alembic -c alembic.ini upgrade head
 alembic -c alembic.ini current
 alembic -c alembic.ini check
-```
-
-Frontend:
-
-```bash
-cd web
-npm ci
-npm run build
-npm run test:e2e
 ```
 
 ## Основные API-группы
@@ -112,8 +143,12 @@ GET      /api/v1/projects/{id}/export/{json|markdown|html}
 
 Секреты задаются только через `.env`, который не должен добавляться в Git. В репозитории находится только `.env.example` с пустыми значениями. Не публикуйте API-ключи, реальные пользовательские данные или локальные базы данных.
 
-Значения PostgreSQL по умолчанию (`analyst`/`analyst`) предназначены только для локального Docker-запуска. Для публичного или production-развёртывания их необходимо заменить и добавить authentication, HTTPS, управление доступом и отдельную политику хранения данных.
+Значения PostgreSQL по умолчанию (`analyst`/`analyst`) предназначены только для локального Docker-запуска. Для production-развёртывания их необходимо заменить и добавить authentication, HTTPS, управление доступом и отдельную политику хранения данных.
 
 ## Лицензия
 
 Проект распространяется по лицензии MIT. См. [LICENSE](LICENSE).
+
+<div align="center">
+  <sub>Built for founders, product teams and evidence-driven experiments.</sub>
+</div>
